@@ -161,3 +161,21 @@ class TestDeleteSession:
         # Verify deletion via list endpoint.
         list_resp = client.get("/admin/escalations?session_id=sess-1", headers=self.HEADERS)
         assert list_resp.json()["total"] == 0
+
+class TestDeleteErasesTrajectory:
+    HEADERS = {"Authorization": "Bearer test-admin-secret"}
+
+    def test_delete_clears_in_memory_trajectory(self, _seeded_db):
+        """Right to erasure must cover live trajectory state, not just DB rows."""
+        from humane_proxy.risk import trajectory as traj
+
+        traj.analyze("sess-1", 0.9, "self_harm")
+        assert "sess-1" in traj.session_history
+
+        resp = client.delete("/admin/sessions/sess-1", headers=self.HEADERS)
+        assert resp.status_code == 204
+        assert "sess-1" not in traj.session_history
+
+        risk = client.get("/admin/sessions/sess-1/risk", headers=self.HEADERS)
+        assert risk.status_code == 200
+        assert risk.json()["trajectory"]["message_count"] == 0

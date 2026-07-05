@@ -79,3 +79,73 @@ def test_postgres_store_creation(mock_psycopg):
     from humane_proxy.storage.postgres import PostgresStore
     store = _create_store(config)
     assert isinstance(store, PostgresStore)
+
+
+# ---------------------------------------------------------------------------
+# Redis rate limiting — regression for the never-incrementing counter
+# ---------------------------------------------------------------------------
+
+def _make_redis_store(mock_client):
+    """Build a RedisStore around a fully mocked redis client."""
+    import humane_proxy.storage.redis as redis_mod
+
+    with patch.object(redis_mod, "_REDIS_AVAILABLE", True), \
+         patch.object(redis_mod, "_redis", create=True) as mock_redis:
+        mock_redis.Redis.from_url.return_value = mock_client
+        store = redis_mod.RedisStore(
+            {"storage": {"redis": {"url": "redis://localhost/0"}}},
+            rate_limit_max=3,
+            rate_limit_window_hours=1,
+        )
+    return store
+
+
+def test_redis_rate_limit_increments_and_blocks():
+    """The old implementation SETEX'd the counter to 1 and never incremented
+    it, so the limit could never trigger.  The atomic Lua script must return
+    an increasing count and the store must block once it exceeds the max."""
+    from unittest.mock import MagicMock
+
+    mock_client = MagicMock()
+    counter = {"n": 0}
+
+    def fake_script(keys, args):
+        counter["n"] += 1
+        return counter["n"]
+
+    mock_client.register_script.return_value = fake_script
+    store = _make_redis_store(mock_client)
+
+    results = [store.check_rate_limit("sess-rl") for _ in range(5)]
+    assert results == [True, True, True, False, False]
+
+
+def test_redis_rate_limit_registers_atomic_script():
+    from unittest.mock import MagicMock
+
+    mock_client = MagicMock()
+    _make_redis_store(mock_client)
+
+    assert mock_client.register_script.called
+    lua = mock_client.register_script.call_args[0][0]
+    assert "INCR" in lua and "EXPIRE" in lua
+
+
+def test_redis_delete_session_cleans_category_index():
+    """delete_session used to leave ids dangling in the category:{cat}
+    sorted sets, inflating counts and breaking the right to erasure."""
+    from unittest.mock import MagicMock
+
+    mock_client = MagicMock()
+    mock_client.zrange.return_value = ["7"]
+    mock_client.hget.return_value = "self_harm"
+    pipe = MagicMock()
+    mock_client.pipeline.return_value = pipe
+
+    store = _make_redis_store(mock_client)
+    deleted = store.delete_session("sess-del")
+
+    assert deleted == 1
+    zrem_keys = [call.args[0] for call in pipe.zrem.call_args_list]
+    assert "humane_proxy:category:self_harm" in zrem_keys
+    assert "humane_proxy:esc_timeline" in zrem_keys

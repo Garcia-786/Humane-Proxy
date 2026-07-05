@@ -6,6 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.1] - 2026-07-05
+
+### Fixed
+
+- **Email-only alert configs never dispatched** — the webhook gate checked a
+  non-existent `webhooks.email_to` key while the dispatcher reads
+  `webhooks.email.to`. Deployments with only SMTP alerts configured silently
+  sent nothing.
+- **LlamaGuard category mapping** — S9 (Indiscriminate Weapons) was mapped to
+  `safe` and S10 (Hate) to `self_harm`, so weapons queries passed Stage 3
+  unflagged while hate speech received a suicide-crisis care response. S9 now
+  maps to `criminal_intent`, S10 to `safe` (out of scope). An `unsafe` verdict
+  with no in-scope codes now returns score 0.0 with an auditable
+  `llamaguard:unsafe_out_of_scope` trigger instead of a score-inflating 0.85.
+- **Redis rate limit never triggered** — the counter was set to 1 once and
+  never incremented, so per-session alert quotas were unlimited. Replaced with
+  an atomic Lua `INCR`+`EXPIRE` script that also removes the multi-worker race
+  (issue #5 pattern).
+- **Redis `delete_session` left dangling ids** in the `category:{cat}` indexes,
+  inflating counts after erasure. Category indexes are now cleaned up.
+- **Right to erasure now covers live trajectory state** — `DELETE
+  /admin/sessions/{id}` clears the in-memory risk trajectory (new
+  `trajectory.forget_session()`), so `/admin/sessions/{id}/risk` no longer
+  returns data for erased sessions.
+
+---
+
 ## [0.5.0] - 2026-07-05
 
 ### Added

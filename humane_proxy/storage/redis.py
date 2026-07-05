@@ -22,6 +22,18 @@ except ImportError:
     _REDIS_AVAILABLE = False
     _redis = None  # type: ignore[assignment]
 
+# Atomic rate-limit check-and-increment (see notes/OPTIMIZATION.md #3).
+# Runs inside Redis' single-threaded event loop, so concurrent workers can
+# never read the same counter value before either increments it.
+# KEYS[1] = rate key, ARGV[1] = window seconds.  Returns the new count.
+_RATE_LIMIT_LUA = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+
 
 class RedisStore(EscalationStore):
     """Redis-backed escalation storage.
@@ -60,6 +72,7 @@ class RedisStore(EscalationStore):
         self._client = _redis.Redis.from_url(url, decode_responses=True)
         self._rate_limit_max = rate_limit_max
         self._rate_limit_window_s = rate_limit_window_hours * 3600
+        self._rate_limit_script = self._client.register_script(_RATE_LIMIT_LUA)
 
     def _key(self, *parts: str) -> str:
         return self._prefix + ":".join(parts)
@@ -161,10 +174,19 @@ class RedisStore(EscalationStore):
         ids = self._client.zrange(self._key("session", session_id), 0, -1)
         if not ids:
             return 0
+        # Fetch categories first so the category indexes can be cleaned too —
+        # otherwise deleted ids linger there, inflating counts and breaking
+        # the right to erasure.
+        categories = {
+            esc_id: self._client.hget(self._key("esc", esc_id), "category")
+            for esc_id in ids
+        }
         pipe = self._client.pipeline()
         for esc_id in ids:
             pipe.delete(self._key("esc", esc_id))
             pipe.zrem(self._key("esc_timeline"), esc_id)
+            if categories.get(esc_id):
+                pipe.zrem(self._key("category", categories[esc_id]), esc_id)
         pipe.delete(self._key("session", session_id))
         pipe.execute()
         return len(ids)
@@ -196,11 +218,10 @@ class RedisStore(EscalationStore):
 
     def check_rate_limit(self, session_id: str) -> bool:
         rate_key = self._key("rate", session_id)
-        current = self._client.get(rate_key)
-        if current is None:
-            self._client.setex(rate_key, self._rate_limit_window_s, 1)
-            return True
-        return int(current) < self._rate_limit_max
+        current = self._rate_limit_script(
+            keys=[rate_key], args=[self._rate_limit_window_s]
+        )
+        return int(current) <= self._rate_limit_max
 
     @staticmethod
     def _parse_record(raw: dict[str, str]) -> dict[str, Any]:

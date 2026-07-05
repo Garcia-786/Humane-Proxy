@@ -215,6 +215,21 @@ def analyze(
     )
 
 
+def forget_session(session_id: str) -> bool:
+    """Erase all in-memory trajectory state for a session.
+
+    Called by the admin ``DELETE /admin/sessions/{id}`` endpoint so the
+    right to erasure covers live trajectory data, not just the DB records.
+
+    Returns ``True`` if the session had any tracked state.
+    """
+    found = session_id in session_history or session_id in _category_history
+    session_history.pop(session_id, None)
+    _category_history.pop(session_id, None)
+    _last_spike_by_session.pop(session_id, None)
+    return found
+
+
 def snapshot(session_id: str) -> TrajectoryResult:
     """Return the current trajectory state without recording a new event."""
     history = session_history.get(session_id, deque())

@@ -298,5 +298,11 @@ def delete_session_data(
     """Delete all escalation records for a session (privacy right to erasure)."""
     store = get_store()
     deleted = store.delete_session(session_id)
+
+    # Erasure must also cover live in-memory trajectory state, otherwise
+    # /admin/sessions/{id}/risk keeps returning data for a deleted session.
+    from humane_proxy.risk.trajectory import forget_session
+    forget_session(session_id)
+
     logger.info("Deleted %d records for session %s (admin request)", deleted, session_id)
     return Response(status_code=204)
