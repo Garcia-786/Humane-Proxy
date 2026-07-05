@@ -63,7 +63,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="HumaneProxy",
-    version="0.5.2",
+    version="0.5.3",
     description="Lightweight AI safety middleware that protects humans.",
     lifespan=_lifespan,
 )

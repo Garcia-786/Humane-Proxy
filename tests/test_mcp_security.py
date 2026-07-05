@@ -1,8 +1,5 @@
 """Security-focused MCP helper tests."""
 
-import sys
-import types
-
 import pytest
 
 from humane_proxy.escalation.query import normalize_escalation_query
@@ -21,24 +18,37 @@ def test_http_mcp_defaults_to_localhost():
 
 
 def test_mcp_auth_provider_uses_configured_bearer_token(monkeypatch):
-    class FakeBearerTokenAuth:
-        def __init__(self, token: str):
-            self.token = token
+    """Must build a provider from the REAL fastmcp package.
 
-    fastmcp_module = types.ModuleType("fastmcp")
-    server_module = types.ModuleType("fastmcp.server")
-    auth_module = types.ModuleType("fastmcp.server.auth")
-    auth_module.BearerTokenAuth = FakeBearerTokenAuth
+    The previous version of this test injected a fake
+    ``fastmcp.server.auth.BearerTokenAuth`` module into sys.modules — a
+    class no fastmcp release actually exports — so the suite passed while
+    the documented HTTP-auth flow crashed at import time with real fastmcp.
+    """
+    pytest.importorskip("fastmcp", reason="requires the [mcp] extra")
 
-    monkeypatch.setitem(sys.modules, "fastmcp", fastmcp_module)
-    monkeypatch.setitem(sys.modules, "fastmcp.server", server_module)
-    monkeypatch.setitem(sys.modules, "fastmcp.server.auth", auth_module)
     monkeypatch.setenv(MCP_TOKEN_ENV, "test-mcp-secret")
 
     auth = _get_mcp_auth_provider()
 
-    assert isinstance(auth, FakeBearerTokenAuth)
-    assert auth.token == "test-mcp-secret"
+    from fastmcp.server.auth import AuthProvider
+    from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+
+    assert isinstance(auth, StaticTokenVerifier)
+    assert isinstance(auth, AuthProvider)
+    assert "test-mcp-secret" in auth.tokens
+
+
+def test_mcp_app_accepts_auth_provider(monkeypatch):
+    """The provider must be accepted by the real FastMCP constructor."""
+    pytest.importorskip("fastmcp", reason="requires the [mcp] extra")
+
+    monkeypatch.setenv(MCP_TOKEN_ENV, "test-mcp-secret")
+
+    from fastmcp import FastMCP
+
+    app = FastMCP("humane-proxy-auth-probe", auth=_get_mcp_auth_provider())
+    assert app.name == "humane-proxy-auth-probe"
 
 
 def test_mcp_auth_provider_is_optional(monkeypatch):

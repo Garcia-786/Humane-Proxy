@@ -38,20 +38,30 @@ def _is_public_bind_host(host: str) -> bool:
 
 
 def _get_mcp_auth_provider():
-    """Return a FastMCP Bearer auth provider when HTTP MCP auth is configured."""
+    """Return a FastMCP auth provider when HTTP MCP auth is configured.
+
+    Uses ``StaticTokenVerifier``, which accepts a fixed bearer token —
+    clients must send ``Authorization: Bearer <token>``.  (Older code
+    imported a ``BearerTokenAuth`` class that no fastmcp release actually
+    exports, so setting the token crashed the server at import time.)
+    """
     token = os.environ.get(MCP_TOKEN_ENV, "").strip()
     if not token:
         return None
 
     try:
-        from fastmcp.server.auth import BearerTokenAuth  # type: ignore[import]
+        from fastmcp.server.auth.providers.jwt import (  # type: ignore[import]
+            StaticTokenVerifier,
+        )
     except ImportError as exc:
         raise RuntimeError(
             f"{MCP_TOKEN_ENV} is set, but this FastMCP version does not expose "
-            "server Bearer token auth. Upgrade fastmcp to use HTTP MCP auth."
+            "StaticTokenVerifier. Upgrade fastmcp (>=2.11) to use HTTP MCP auth."
         ) from exc
 
-    return BearerTokenAuth(token=token)
+    return StaticTokenVerifier(
+        tokens={token: {"client_id": "humane-proxy-admin", "scopes": []}}
+    )
 
 
 try:

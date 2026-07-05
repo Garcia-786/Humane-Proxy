@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "humane-proxy"
-version = "0.5.2"
+version = "0.5.3"
 description = "Lightweight, plug-and-play AI safety middleware that protects humans."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -49,7 +49,8 @@ ml = [
     "sentence-transformers>=2.2.0",
 ]
 mcp = [
-    "fastmcp>=0.4.0",
+    # >=2.11 needed for fastmcp.server.auth.providers.jwt.StaticTokenVerifier
+    "fastmcp>=2.11",
 ]
 langchain = [
     "humane-proxy[mcp]",

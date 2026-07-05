@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.3] - 2026-07-05
+
+### Fixed
+
+- **HTTP MCP auth crashed with real fastmcp** — the server imported a
+  `fastmcp.server.auth.BearerTokenAuth` class that no fastmcp release
+  exports, so setting `HUMANE_PROXY_ADMIN_KEY` (exactly as the README
+  instructs) made `mcp-serve` fail at import. Auth now uses fastmcp's
+  `StaticTokenVerifier`; the `[mcp]` extra requires `fastmcp>=2.11`.
+  The masking test that injected a fake fastmcp module into `sys.modules`
+  was replaced with tests against the real package.
+- **`.env` guidance corrected** — README Quick Start and `humane-proxy init`
+  said to put `LLM_API_KEY`/`LLM_API_URL` "in .env", but HumaneProxy never
+  loads `.env` files; following the docs verbatim produced a 503 on every
+  safe message. Docs now show explicit exports (with `source .env` guidance),
+  and the interceptor reads both vars at request time instead of import time.
+
+### Tests
+
+- `conftest.py` now resets the storage-factory singleton per test — the
+  cached store previously kept the first test's temp DB path for the whole
+  session, making per-test DB isolation illusory.
+
+---
+
 ## [0.5.2] - 2026-07-05
 
 ### Fixed
