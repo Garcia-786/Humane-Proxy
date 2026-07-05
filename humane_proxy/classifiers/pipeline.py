@@ -215,7 +215,7 @@ class SafetyPipeline:
         _stage3_warning_shown = True
         logger.warning(
             "\n"
-            "⚠️  Stage-3 classification is DISABLED (no API key detected).\n"
+            "Stage-3 classification is DISABLED (no API key detected).\n"
             "    For stronger protection, set up a Stage-3 provider:\n"
             "\n"
             "    Option A — OpenAI Moderation (free with any OpenAI key):\n"

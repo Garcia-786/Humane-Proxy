@@ -6,6 +6,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.6] - 2026-07-06
+
+### Changed
+
+- **No-emoji policy across the repository** — all emoji characters removed
+  from source, output strings, docs, and CI files:
+  - Severity markers in webhook alerts (Slack/Discord/Teams/email), the
+    CRITICAL log banner, and CLI output are now bracketed ASCII tags
+    (`[SELF-HARM]`, `[ALERT]`, `[FLAGGED]`, `[SAFE]`, `[OK]`, `[WARN]`,
+    `[INFO]`, `[ERROR]`), matching the benchmark's existing `[PASS]`/`[FAIL]`
+    convention. Discord/Teams urgency remains color-coded.
+  - The self-harm care response lists crisis resources under plain country
+    names (flag emojis removed; helpline content unchanged).
+  - Docs tables (README, COMPLIANCE, LAUNCHGUIDE, SECURITY) use
+    "Yes"/"No"/"Conditional" instead of symbols.
+  - The policy is CI-enforced by a new `tests/test_no_emoji.py`, which scans
+    every tracked file; the single sanctioned exemption is CONTRIBUTING.md's
+    AI-PR title marker.
+- **Repository layout decluttered** — `COMPLIANCE.md` and `LAUNCHGUIDE.md`
+  moved to `docs/`; `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md` moved to
+  `.github/` alongside `SECURITY.md`; the Glama marketplace `Dockerfile` and
+  `.dockerignore` moved to `deploy/glama/` with a README (HumaneProxy is not
+  served via Docker — the container definition exists only for the Glama
+  listing).
+
+### Removed
+
+- `requirements.txt` — duplicated `pyproject.toml` dependencies and had
+  already drifted once; `pyproject.toml` is the single source of truth.
+- `.github/labels.yml` — one-time label-sync input, no longer consumed by
+  any workflow (existing GitHub labels are unaffected).
+
+### Fixed
+
+- `humane-proxy init` crashed with `UnicodeEncodeError` on default Windows
+  (cp1252) consoles — CLI output is now console-encoding-safe.
+
+---
+
 ## [0.5.5] - 2026-07-06
 
 ### Changed

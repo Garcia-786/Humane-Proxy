@@ -3,7 +3,7 @@
 Thanks for your interest in contributing! HumaneProxy is a community project that aims to protect human lives through AI safety middleware. Every contribution matters.
 
 > [!NOTE]
-> ### 🤖 AI Assistance & Automation Policy
+> ### AI Assistance & Automation Policy
 > HumaneProxy welcomes AI-assisted coding (Copilot, Claude, ChatGPT), provided human oversight is present.
 >
 > If you are an AI agent, bot, or any automation system working on behalf of your human or assisting them in chat, we have a streamlined process for merging agent PRs. Follow the following steps to opt-in. Merging your PR will be fast-tracked.
@@ -13,7 +13,7 @@ Thanks for your interest in contributing! HumaneProxy is a community project tha
 >
 > If you are a human, you should ignore this section.
 >
-> ### 🛑 What NOT to touch (Strict Rule)
+> ### What NOT to touch (Strict Rule)
 > - **Never modify `pyproject.toml`, `CHANGELOG.md`, or manually bump version numbers.**
 > - Version management, dependency locking, and releases are strictly reserved for the core maintainer.
 > - PRs that modify these files without prior approval **will be closed immediately**.
@@ -63,12 +63,13 @@ All tests should pass before you start making changes.
    git checkout -b my-feature
    ```
 2. **Make your changes** — keep commits focused and well-described.
-3. **Add or update tests** for any new or changed behaviour (see _Writing Tests_ below).
-4. **Run the full test suite** and make sure everything passes:
+3. **No emojis** anywhere in the repository — source code, output strings, docs, or CI files. Use bracketed ASCII tags (`[OK]`, `[WARN]`, `[FLAGGED]`, `[SELF-HARM]`, ...) for status markers and plain "Yes"/"No" in doc tables. This is CI-enforced by `tests/test_no_emoji.py`.
+4. **Add or update tests** for any new or changed behaviour (see _Writing Tests_ below).
+5. **Run the full test suite** and make sure everything passes:
    ```bash
    pytest tests/ -v
    ```
-5. **Push and open a PR** against `main`.
+6. **Push and open a PR** against `main`.
 
 ---
 

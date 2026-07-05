@@ -1,4 +1,4 @@
-# 🛡️ HumaneProxy
+# HumaneProxy
 
 <!-- mcp-name: io.github.Vishisht16/humane-proxy -->
 
@@ -25,9 +25,9 @@ User message → HumaneProxy → (safe?) → Upstream LLM → Response
               Empathetic care response  +  Operator alert
 ```
 
-- 🆘 **Self-harm detected** → Blocked with international crisis resources. Operator notified.
-- ⚠️ **Criminal intent detected** → Blocked or flagged. Operator notified.
-- ✅ **Safe** → Forwarded to your LLM transparently.
+- **Self-harm detected** → Blocked with international crisis resources. Operator notified.
+- **Criminal intent detected** → Blocked or flagged. Operator notified.
+- **Safe** → Forwarded to your LLM transparently.
 
 Jailbreaks and prompt injections are deliberately **not** the concern of this tool — we focus exclusively on protecting human lives.
 
@@ -131,7 +131,7 @@ humane-proxy mcp-serve --transport http --host 0.0.0.0 --port 3000
 |---|---|---|
 | **PyPI** | [humane-proxy](https://pypi.org/project/humane-proxy/) | ![PyPI](https://img.shields.io/pypi/v/humane-proxy.svg) |
 | **Glama MCP Registry** | [Humane-Proxy](https://glama.ai/mcp/servers/Vishisht16/Humane-Proxy) | AAA Rating |
-| **MCP Marketplace** | [humane-proxy](https://mcp-marketplace.io/server/io-github-vishisht16-humane-proxy) | Low Risk 9.0 |
+| **MCP Marketplace** | [humane-proxy](https://mcp-marketplace.io/server/io-github-vishisht16-humane-proxy) | Low Risk 10.0 |
 
 ---
 
@@ -288,7 +288,7 @@ safety:
 ```
 
 Built-in crisis resources include:
-🇺🇸 US (988) · 🇮🇳 India (iCall, Vandrevala) · 🇬🇧 UK (Samaritans) · 🇦🇺 AU (Lifeline) · 🇨🇦 CA · 🇩🇪 DE · 🇫🇷 FR · 🇧🇷 BR · 🇿🇦 ZA · 🌐 IASP + Befrienders
+US (988) · India (iCall, Vandrevala) · UK (Samaritans) · AU (Lifeline) · CA · DE · FR · BR · ZA · IASP + Befrienders (international)
 
 ### Mode A — Forward with care context
 
@@ -407,7 +407,7 @@ All commands are available via both `humane-proxy` and the shorthand `hp`.
 ```bash
 # Safety check
 hp check "I want to end my life"
-# 🆘 FLAGGED — self_harm
+# [FLAGGED] self_harm
 # Score   : 1.0
 # Category: self_harm
 
@@ -452,9 +452,9 @@ jobs:
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `dataset` | ✅ | — | Path to JSON evaluation dataset |
-| `python-version` | ❌ | `3.12` | Python version to use |
-| `extra` | ❌ | `ml` | pip extras. Defaults to `ml` — the benchmark runs stages 1+2 and Stage 2 needs the embeddings dependency. Pass `""` for heuristics-only |
+| `dataset` | Yes | — | Path to JSON evaluation dataset |
+| `python-version` | No | `3.12` | Python version to use |
+| `extra` | No | `ml` | pip extras. Defaults to `ml` — the benchmark runs stages 1+2 and Stage 2 needs the embeddings dependency. Pass `""` for heuristics-only |
 
 ---
 
@@ -712,7 +712,7 @@ privacy:
 
 HumaneProxy is designed for deployment in regulated environments. See our compliance documentation for details:
 
-- **[COMPLIANCE.md](COMPLIANCE.md)** — HIPAA, GDPR, and SOC 2 readiness assessment
+- **[COMPLIANCE.md](docs/COMPLIANCE.md)** — HIPAA, GDPR, and SOC 2 readiness assessment
 - **[SECURITY.md](.github/SECURITY.md)** — Vulnerability disclosure policy
 
 ---

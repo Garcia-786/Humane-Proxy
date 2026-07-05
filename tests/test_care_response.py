@@ -149,7 +149,7 @@ class TestRegionAwareCareResponse:
             result = get_self_harm_response()
         body = result["message"].split("Please reach out to a crisis service near you:")[1].lstrip()
         # India's block should come first after the intro.
-        assert body.startswith("🇮🇳")
+        assert body.startswith("India")
 
     def test_region_still_includes_other_countries(self):
         with patch("humane_proxy.escalation.router.get_config", return_value=self._region_config("IN")):
@@ -163,7 +163,7 @@ class TestRegionAwareCareResponse:
         with patch("humane_proxy.escalation.router.get_config", return_value=self._region_config("in")):
             result = get_self_harm_response()
         body = result["message"].split("Please reach out to a crisis service near you:")[1].lstrip()
-        assert body.startswith("🇮🇳")
+        assert body.startswith("India")
 
     def test_unknown_region_falls_back_to_full_default(self):
         with patch("humane_proxy.escalation.router.get_config", return_value=self._region_config("ZZ")):

@@ -155,7 +155,7 @@ LLM_API_URL=
 
 @click.group()
 def main() -> None:
-    """🛡️  HumaneProxy — AI safety middleware that protects humans."""
+    """HumaneProxy — AI safety middleware that protects humans."""
     pass
 
 
@@ -167,28 +167,28 @@ def init() -> None:
 
     yaml_path = cwd / "humane_proxy.yaml"
     if yaml_path.exists():
-        click.echo(f"  ⚠  {yaml_path.name} already exists, skipping.")
+        click.echo(f"  [WARN] {yaml_path.name} already exists, skipping.")
     else:
         yaml_path.write_text(_DEFAULT_YAML_CONTENT, encoding="utf-8")
         created.append(yaml_path.name)
 
     env_path = cwd / ".env.example"
     if env_path.exists():
-        click.echo(f"  ⚠  {env_path.name} already exists, skipping.")
+        click.echo(f"  [WARN] {env_path.name} already exists, skipping.")
     else:
         env_path.write_text(_DEFAULT_ENV_CONTENT, encoding="utf-8")
         created.append(env_path.name)
 
     if created:
-        click.echo(f"\n  ✅ Created: {', '.join(created)}")
+        click.echo(f"\n  [OK] Created: {', '.join(created)}")
         click.echo("\n  Next steps:")
-        click.echo("    1. Copy .env.example → .env and fill in your LLM_API_KEY / LLM_API_URL")
+        click.echo("    1. Copy .env.example -> .env and fill in your LLM_API_KEY / LLM_API_URL")
         click.echo("    2. Load it into your environment (HumaneProxy does not auto-load .env):")
         click.echo("         set -a; source .env; set +a")
         click.echo("    3. Edit humane_proxy.yaml to customise thresholds & keywords")
         click.echo("    4. Run: humane-proxy start")
     else:
-        click.echo("\n  ℹ  Nothing to create — files already exist.")
+        click.echo("\n  [INFO] Nothing to create — files already exist.")
 
 
 @main.command()
@@ -208,9 +208,9 @@ def start(host: str | None, port: int | None, reload: bool | None) -> None:
     final_port = port or server_cfg.get("port", 8000)
     final_reload = reload if reload is not None else server_cfg.get("reload", False)
 
-    click.echo(f"  🛡️  Starting HumaneProxy on {final_host}:{final_port}")
+    click.echo(f"  Starting HumaneProxy on {final_host}:{final_port}")
     if final_reload:
-        click.echo("  🔄 Auto-reload enabled")
+        click.echo("  [INFO] Auto-reload enabled")
     click.echo("")
 
     import uvicorn
@@ -236,19 +236,19 @@ def check(text: str, session: str) -> None:
     category = result.get("category", "safe")
 
     if category == "self_harm":
-        icon = "🆘"
-        label = "FLAGGED — self_harm"
+        icon = "[FLAGGED]"
+        label = "self_harm"
     elif category == "criminal_intent" and not result["safe"]:
-        icon = "⚠️"
-        label = "FLAGGED — criminal_intent"
+        icon = "[FLAGGED]"
+        label = "criminal_intent"
     elif result["safe"]:
-        icon = "✅"
-        label = "SAFE"
+        icon = "[SAFE]"
+        label = ""
     else:
-        icon = "⚠️"
-        label = f"FLAGGED — {category}"
+        icon = "[FLAGGED]"
+        label = f"{category}"
 
-    click.echo(f"\n  {icon} {label}")
+    click.echo(f"\n  {icon} {label}".rstrip())
     click.echo(f"  Score   : {result['score']}")
     click.echo(f"  Category: {category}")
     if result["triggers"]:
@@ -278,7 +278,7 @@ def escalations(category: str | None, limit: int, session: str | None) -> None:
     rows = store.query(category=category, session_id=session, limit=limit, offset=0)
 
     if not rows:
-        click.echo("  ℹ  No escalations found.")
+        click.echo("  [INFO] No escalations found.")
         return
 
     click.echo(f"\n  {'ID':<6} {'Session':<28} {'Category':<18} {'Score':<7} {'When'}")
@@ -287,8 +287,7 @@ def escalations(category: str | None, limit: int, session: str | None) -> None:
         from datetime import datetime, timezone
         dt = datetime.fromtimestamp(rec["timestamp"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         cat = rec["category"]
-        emoji = "🆘" if cat == "self_harm" else "⚠️"
-        click.echo(f"  {rec['id']:<6} {rec['session_id']:<28} {emoji} {cat:<16} {rec['risk_score']:.2f}  {dt}")
+        click.echo(f"  {rec['id']:<6} {rec['session_id']:<28} {cat:<18} {rec['risk_score']:.2f}  {dt}")
     click.echo("")
 
 
@@ -301,18 +300,17 @@ def session(session_id: str) -> None:
     store = get_store()
     rows = store.query(session_id=session_id, limit=500, offset=0)
 
-    click.echo(f"\n  📊 Session: {session_id}")
+    click.echo(f"\n  Session: {session_id}")
     click.echo(f"  Escalation count: {len(rows)}\n")
 
     if not rows:
-        click.echo("  ℹ  No escalations recorded for this session.")
+        click.echo("  [INFO] No escalations recorded for this session.")
         return
 
     for rec in rows:
         from datetime import datetime, timezone
         dt = datetime.fromtimestamp(rec["timestamp"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         cat = rec["category"]
-        emoji = "🆘" if cat == "self_harm" else "⚠️"
         trigs = rec.get("triggers", [])
         if isinstance(trigs, str):
             import json
@@ -320,7 +318,7 @@ def session(session_id: str) -> None:
                 trigs = json.loads(trigs)
             except Exception:
                 trigs = []
-        click.echo(f"  {emoji} {dt}  score={rec['risk_score']:.2f}  category={cat}")
+        click.echo(f"  {dt}  score={rec['risk_score']:.2f}  category={cat}")
         if trigs:
             click.echo(f"     triggers: {', '.join(trigs[:3])}")
 
@@ -561,14 +559,14 @@ def mcp_serve(transport: str, host: str, port: int) -> None:
     try:
         if transport == "http":
             from humane_proxy.mcp_server import serve_http
-            click.echo(f"  🤖 Starting HumaneProxy MCP server (HTTP) on {host}:{port}...")
+            click.echo(f"  Starting HumaneProxy MCP server (HTTP) on {host}:{port}...")
             serve_http(host=host, port=port)
         else:
             from humane_proxy.mcp_server import serve
-            click.echo("  🤖 Starting HumaneProxy MCP server (stdio)...", err=True)
+            click.echo("  Starting HumaneProxy MCP server (stdio)...", err=True)
             serve()
     except RuntimeError as exc:
-        click.echo(f"\n  ❌ {exc}\n", err=True)
+        click.echo(f"\n  [ERROR] {exc}\n", err=True)
         sys.exit(1)
 
 

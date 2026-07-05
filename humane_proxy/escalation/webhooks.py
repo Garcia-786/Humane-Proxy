@@ -17,6 +17,11 @@ from urllib.parse import urlparse
 logger = logging.getLogger("humane_proxy.escalation.webhooks")
 
 
+def _category_label(category: str) -> str:
+    """Return the bracketed severity tag used across all alert channels."""
+    return "[SELF-HARM]" if category == "self_harm" else "[ALERT]"
+
+
 def _sanitize_url(url: str) -> str:
     """Return only scheme + host of *url* for safe logging.
 
@@ -66,7 +71,6 @@ async def send_slack(
     category: str = "unknown",
 ) -> None:
     """Send a Slack Block Kit formatted alert."""
-    category_emoji = "🆘" if category == "self_harm" else "⚠️"
     trigger_text = "\n".join(f"• {t}" for t in triggers) or "(none)"
     payload = {
         "blocks": [
@@ -74,8 +78,8 @@ async def send_slack(
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f"{category_emoji} HumaneProxy Alert — {category}",
-                    "emoji": True,
+                    "text": f"{_category_label(category)} HumaneProxy Alert — {category}",
+                    "emoji": False,
                 },
             },
             {
@@ -92,7 +96,7 @@ async def send_slack(
             {
                 "type": "context",
                 "elements": [
-                    {"type": "mrkdwn", "text": f"⏱ {datetime.now(timezone.utc).isoformat()}"},
+                    {"type": "mrkdwn", "text": f"Time: {datetime.now(timezone.utc).isoformat()}"},
                 ],
             },
         ]
@@ -113,12 +117,11 @@ async def send_discord(
 ) -> None:
     """Send a Discord embed formatted alert."""
     color = 15158332 if category == "self_harm" else 16744192
-    category_emoji = "🆘" if category == "self_harm" else "⚠️"
     trigger_text = "\n".join(f"• {t}" for t in triggers) or "(none)"
     payload = {
         "embeds": [
             {
-                "title": f"{category_emoji} HumaneProxy Alert — {category}",
+                "title": f"{_category_label(category)} HumaneProxy Alert — {category}",
                 "color": color,
                 "fields": [
                     {"name": "Session", "value": f"`{session_id}`", "inline": True},
@@ -179,7 +182,6 @@ async def send_teams(
     category: str = "unknown",
 ) -> None:
     """Send a Microsoft Teams adaptive card alert."""
-    category_emoji = "🆘" if category == "self_harm" else "⚠️"
     trigger_text = "\n\n".join(f"• {t}" for t in triggers) or "(none)"
     color = "FF0000" if category == "self_harm" else "FF8C00"
     payload = {
@@ -194,7 +196,7 @@ async def send_teams(
                     "body": [
                         {
                             "type": "TextBlock",
-                            "text": f"{category_emoji} HumaneProxy Alert — {category}",
+                            "text": f"{_category_label(category)} HumaneProxy Alert — {category}",
                             "weight": "Bolder",
                             "size": "Large",
                             "color": "Attention" if category == "self_harm" else "Warning",
@@ -246,10 +248,10 @@ async def send_email(
         if not to_addrs:
             return
 
-        category_emoji = "🆘" if category == "self_harm" else "⚠️"
+        category_label = _category_label(category)
         trigger_list = "\n".join(f"  • {t}" for t in triggers) or "  (none)"
         body = (
-            f"{category_emoji} HumaneProxy Safety Alert\n"
+            f"{category_label} HumaneProxy Safety Alert\n"
             f"{'=' * 50}\n\n"
             f"Category  : {category}\n"
             f"Session   : {session_id}\n"
@@ -259,7 +261,7 @@ async def send_email(
         )
 
         msg = MIMEMultipart()
-        msg["Subject"] = f"[HumaneProxy] {category_emoji} {category} alert — session {session_id}"
+        msg["Subject"] = f"[HumaneProxy] {category_label} {category} alert — session {session_id}"
         msg["From"] = from_addr
         msg["To"] = ", ".join(to_addrs)
         msg.attach(MIMEText(body, "plain", "utf-8"))

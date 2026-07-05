@@ -29,25 +29,25 @@ _CARE_INTRO = (
 
 # Ordered: code -> resource block. Order preserved for the default (no-region) message.
 _CRISIS_RESOURCES: dict[str, str] = {
-    "US": "🇺🇸 United States\n  • 988 Suicide & Crisis Lifeline: Call or text 988\n  • Crisis Text Line: Text HOME to 741741",
-    "IN": "🇮🇳 India\n  • iCall (TISS): 9152987821\n  • Vandrevala Foundation: 1860-2662-345 (24/7)\n  • NIMHANS: 080-46110007",
-    "GB": "🇬🇧 United Kingdom\n  • Samaritans: 116 123 (free, 24/7)\n  • PAPYRUS (youth): 0800 068 4141",
-    "AU": "🇦🇺 Australia\n  • Lifeline: 13 11 14\n  • Beyond Blue: 1300 22 4636",
-    "CA": "🇨🇦 Canada\n  • Talk Suicide Canada: 1-833-456-4566\n  • Crisis Text Line: Text HOME to 686868",
-    "DE": "🇩🇪 Germany\n  • Telefonseelsorge: 0800 111 0 111 (free, 24/7)",
-    "FR": "🇫🇷 France\n  • Suicide Écoute: 01 45 39 40 00\n  • Numéro National Prévention Suicide: 3114",
-    "BR": "🇧🇷 Brazil\n  • CVV (Centro de Valorização da Vida): 188",
-    "ZA": "🇿🇦 South Africa\n  • SADAG: 0800 567 567",
-    "JP": "🇯🇵 Japan\n  • Inochi no Denwa: 0120-783-556",
-    "KR": "🇰🇷 South Korea\n  • Crisis Counseling Hotline: 1393",
-    "ES": "🇪🇸 Spain\n  • Línea de Atención a conducta suicida: 024",
-    "IT": "🇮🇹 Italy\n  • Telefono Amico: 800 274 274",
-    "MX": "🇲🇽 Mexico\n  • SAPTEL: 800 290 0024",
-    "NZ": "🇳🇿 New Zealand\n  • Need to Talk?: 1737",
+    "US": "United States\n  • 988 Suicide & Crisis Lifeline: Call or text 988\n  • Crisis Text Line: Text HOME to 741741",
+    "IN": "India\n  • iCall (TISS): 9152987821\n  • Vandrevala Foundation: 1860-2662-345 (24/7)\n  • NIMHANS: 080-46110007",
+    "GB": "United Kingdom\n  • Samaritans: 116 123 (free, 24/7)\n  • PAPYRUS (youth): 0800 068 4141",
+    "AU": "Australia\n  • Lifeline: 13 11 14\n  • Beyond Blue: 1300 22 4636",
+    "CA": "Canada\n  • Talk Suicide Canada: 1-833-456-4566\n  • Crisis Text Line: Text HOME to 686868",
+    "DE": "Germany\n  • Telefonseelsorge: 0800 111 0 111 (free, 24/7)",
+    "FR": "France\n  • Suicide Écoute: 01 45 39 40 00\n  • Numéro National Prévention Suicide: 3114",
+    "BR": "Brazil\n  • CVV (Centro de Valorização da Vida): 188",
+    "ZA": "South Africa\n  • SADAG: 0800 567 567",
+    "JP": "Japan\n  • Inochi no Denwa: 0120-783-556",
+    "KR": "South Korea\n  • Crisis Counseling Hotline: 1393",
+    "ES": "Spain\n  • Línea de Atención a conducta suicida: 024",
+    "IT": "Italy\n  • Telefono Amico: 800 274 274",
+    "MX": "Mexico\n  • SAPTEL: 800 290 0024",
+    "NZ": "New Zealand\n  • Need to Talk?: 1737",
 }
 
 _CARE_INTERNATIONAL = (
-    "🌐 International:\n"
+    "International:\n"
     "  • IASP Crisis Centres: https://www.iasp.info/resources/Crisis_Centres/\n"
     "  • Befrienders Worldwide: https://www.befrienders.org"
 )
@@ -238,18 +238,18 @@ def escalate(
         }
 
     # --- Highly-visible structured log ---
-    category_emoji = "🆘" if category == "self_harm" else "⚠️"
+    category_label = "[SELF-HARM]" if category == "self_harm" else "[ALERT]"
     border = "!" * 60
     logger.critical(
         "\n%s\n"
-        "!!  %s CRITICAL SAFETY ALERT\n"
+        "!!  CRITICAL SAFETY ALERT %s\n"
         "!!  Category     : %s\n"
         "!!  Session      : %s\n"
         "!!  Risk Score   : %.2f\n"
         "!!  Stage Reached: %d\n"
         "!!  Triggers     : %s\n"
         "%s",
-        border, category_emoji, category, session_id,
+        border, category_label, category, session_id,
         risk_score, stage_reached, triggers, border,
     )
 
