@@ -7,15 +7,9 @@ server:
   port: 8000
   reload: false
 
-safety:
-  # Risk score threshold (0.0 - 1.0). Scores at or above this trigger escalation.
-  risk_threshold: 0.7
-
-  # Score boost applied when a trajectory spike is detected.
-  spike_boost: 0.25
-
-  # Maximum number of messages to retain per session for trajectory analysis.
-  session_history_limit: 20
+# NOTE: `safety` and `escalation` are defined once each, further below.
+# YAML silently keeps only the LAST duplicate top-level key, so never add
+# a second block for an existing key.
 
 heuristics:
   # Self-harm keywords — phrases that indicate self-harm ideation.
@@ -108,17 +102,6 @@ trajectory:
   #   72  → gentle decay; multi-day memory
   #   0   → disable decay entirely (plain unweighted mean)
   decay_half_life_hours: 24.0
-
-escalation:
-  # Per-session rate limiting for escalation logging.
-  rate_limit_max: 3
-  rate_limit_window_hours: 1
-
-  # Webhook URLs — leave empty to disable.
-  webhooks:
-    slack_url: ""
-    discord_url: ""
-    pagerduty_routing_key: ""
 
 # ---------------------------------------------------------------------------
 # 3-Stage Cascade Pipeline (Phase 2)

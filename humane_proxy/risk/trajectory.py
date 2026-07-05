@@ -11,27 +11,55 @@ import math
 import time
 from collections import deque
 
-from humane_proxy import load_config
+from humane_proxy.config import get_config
 from humane_proxy.classifiers.models import TrajectoryResult
 
 # ---------------------------------------------------------------------------
 # Configuration
+#
+# These globals are (re)built by :func:`_refresh_config` from the **merged**
+# configuration (package defaults -> user humane_proxy.yaml -> HUMANE_PROXY_*
+# env vars such as HUMANE_PROXY_DECAY_HALF_LIFE).  They refresh automatically
+# whenever the cached config object changes — previously this module read
+# only the package defaults, once, at import time, silently ignoring all
+# documented overrides.
 # ---------------------------------------------------------------------------
-_CFG: dict = load_config().get("trajectory", {})
-_WINDOW_SIZE: int = _CFG.get("window_size", 5)
-_SPIKE_DELTA: float = _CFG.get("spike_delta", 0.35)
+_cfg_snapshot: dict | None = None
+
+_WINDOW_SIZE: int = 5
+_SPIKE_DELTA: float = 0.35
 
 # Decay half-life in hours.  After this many hours a historical score
 # contributes only 50 % of its original weight to the rolling baseline.
 # Set to 0 or negative to disable decay entirely.
-_DECAY_HALF_LIFE_HOURS: float = _CFG.get("decay_half_life_hours", 24.0)
+_DECAY_HALF_LIFE_HOURS: float = 24.0
 
-# Precompute lambda: λ = ln(2) / half_life.
-_DECAY_LAMBDA: float = (
-    math.log(2) / (_DECAY_HALF_LIFE_HOURS * 3600)
-    if _DECAY_HALF_LIFE_HOURS > 0
-    else 0.0
-)
+# Precomputed lambda: λ = ln(2) / half_life.
+_DECAY_LAMBDA: float = math.log(2) / (_DECAY_HALF_LIFE_HOURS * 3600)
+
+
+def _refresh_config() -> None:
+    """Re-read trajectory settings when the merged config changes.
+
+    Note: ``window_size`` changes only apply to sessions created after the
+    change — existing deques keep their original ``maxlen``.
+    """
+    global _cfg_snapshot, _WINDOW_SIZE, _SPIKE_DELTA
+    global _DECAY_HALF_LIFE_HOURS, _DECAY_LAMBDA
+
+    cfg = get_config().get("trajectory", {})
+    if cfg is _cfg_snapshot:
+        return
+    _cfg_snapshot = cfg
+
+    _WINDOW_SIZE = cfg.get("window_size", 5)
+    _SPIKE_DELTA = cfg.get("spike_delta", 0.35)
+    _DECAY_HALF_LIFE_HOURS = cfg.get("decay_half_life_hours", 24.0)
+    _DECAY_LAMBDA = (
+        math.log(2) / (_DECAY_HALF_LIFE_HOURS * 3600)
+        if _DECAY_HALF_LIFE_HOURS > 0
+        else 0.0
+    )
 
 # Maximum distinct sessions to track before eviction (memory-leak prevention).
 _MAX_SESSIONS: int = 1000
@@ -136,6 +164,7 @@ def detect_spike(session_id: str, current_score: float) -> bool:
     bool
         Whether a spike was detected.
     """
+    _refresh_config()
     now = time.time()
 
     # --- memory-leak guard ---
@@ -193,7 +222,8 @@ def analyze(
         Rich trajectory analysis including spike detection, trend, and
         category distribution.
     """
-    # Run spike detection (this also appends the score to session_history).
+    # Run spike detection (this also appends the score to session_history
+    # and refreshes config-derived settings).
     spike = detect_spike(session_id, score)
     _last_spike_by_session[session_id] = spike
 

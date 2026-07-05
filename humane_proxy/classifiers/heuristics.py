@@ -17,40 +17,68 @@ from __future__ import annotations
 
 import re
 
-from humane_proxy import load_config
+from humane_proxy.config import get_config
 
-_CFG: dict = load_config().get("heuristics", {})
 
-# ---------------------------------------------------------------------------
-# Self-harm keywords
-# ---------------------------------------------------------------------------
-_SELF_HARM_KEYWORDS: list[str] = [
-    kw.lower() for kw in _CFG.get("self_harm_keywords", [])
-]
-_SELF_HARM_KEYWORD_SCORE: float = _CFG.get("self_harm_keyword_score", 0.7)
+def _word_boundary_pattern(phrase: str) -> re.Pattern[str]:
+    """Compile a case-insensitive word-boundary pattern for *phrase*."""
+    return re.compile(rf"(?<!\w){re.escape(phrase)}(?!\w)", re.I)
 
-_SELF_HARM_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    (kw, re.compile(rf"(?<!\w){re.escape(kw)}(?!\w)", re.I))
-    for kw in _SELF_HARM_KEYWORDS
-]
 
 # ---------------------------------------------------------------------------
-# Criminal intent keywords
+# Config-derived state.
+#
+# These globals are (re)built by :func:`_refresh_config` from the **merged**
+# configuration (package defaults -> user humane_proxy.yaml -> HUMANE_PROXY_*
+# env vars).  They refresh automatically whenever the cached config object
+# changes (e.g. after ``config.reload_config()``), so user keyword lists and
+# score overrides are honored — previously this module read only the package
+# defaults, once, at import time.
 # ---------------------------------------------------------------------------
-_CRIMINAL_KEYWORDS: list[str] = [
-    kw.lower() for kw in _CFG.get("criminal_keywords", [])
-]
-_CRIMINAL_KEYWORD_SCORE: float = _CFG.get("criminal_keyword_score", 0.6)
+_cfg_snapshot: dict | None = None
 
-_CRIMINAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    (kw, re.compile(rf"(?<!\w){re.escape(kw)}(?!\w)", re.I))
-    for kw in _CRIMINAL_KEYWORDS
-]
+_SELF_HARM_KEYWORD_SCORE: float = 0.7
+_CRIMINAL_KEYWORD_SCORE: float = 0.6
+_INTENT_PATTERN_SCORE: float = 0.7
+
+_SELF_HARM_PATTERNS: list[tuple[str, re.Pattern[str]]] = []
+_CRIMINAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = []
+_CONTEXT_REDUCER_PATTERNS: list[re.Pattern[str]] = []
+
+
+def _refresh_config() -> None:
+    """Rebuild keyword/reducer patterns when the merged config changes."""
+    global _cfg_snapshot, _SELF_HARM_KEYWORD_SCORE, _CRIMINAL_KEYWORD_SCORE
+    global _INTENT_PATTERN_SCORE, _SELF_HARM_PATTERNS, _CRIMINAL_PATTERNS
+    global _CONTEXT_REDUCER_PATTERNS
+
+    cfg = get_config().get("heuristics", {})
+    if cfg is _cfg_snapshot:
+        return
+    _cfg_snapshot = cfg
+
+    _SELF_HARM_KEYWORD_SCORE = cfg.get("self_harm_keyword_score", 0.7)
+    _CRIMINAL_KEYWORD_SCORE = cfg.get("criminal_keyword_score", 0.6)
+    _INTENT_PATTERN_SCORE = cfg.get("intent_pattern_score", 0.7)
+
+    _SELF_HARM_PATTERNS = [
+        (kw.lower(), _word_boundary_pattern(kw.lower()))
+        for kw in cfg.get("self_harm_keywords", [])
+    ]
+    _CRIMINAL_PATTERNS = [
+        (kw.lower(), _word_boundary_pattern(kw.lower()))
+        for kw in cfg.get("criminal_keywords", [])
+    ]
+    _CONTEXT_REDUCER_PATTERNS = [
+        _word_boundary_pattern(r.lower())
+        for r in cfg.get("context_reducers", [])
+    ]
+
 
 # ---------------------------------------------------------------------------
 # Intent patterns — regex patterns that detect grammatical intent structures
+# (static — not configurable; only their score comes from config)
 # ---------------------------------------------------------------------------
-_INTENT_PATTERN_SCORE: float = _CFG.get("intent_pattern_score", 0.7)
 
 # Each entry: (name, category, compiled_pattern)
 _INTENT_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
@@ -108,19 +136,6 @@ _INTENT_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     ),
 ]
 
-# ---------------------------------------------------------------------------
-# Context reducers — phrases that indicate non-harmful context
-# ---------------------------------------------------------------------------
-_CONTEXT_REDUCERS: list[str] = [
-    r.lower() for r in _CFG.get("context_reducers", [])
-]
-
-_CONTEXT_REDUCER_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(rf"(?<!\w){re.escape(r)}(?!\w)", re.I)
-    for r in _CONTEXT_REDUCERS
-]
-
-
 def classify(text: str) -> tuple[str, float, list[str]]:
     """Run heuristic checks on *text* and return ``(category, score, triggers)``.
 
@@ -136,6 +151,9 @@ def classify(text: str) -> tuple[str, float, list[str]]:
         ``"safe"``), a risk score clamped to ``[0.0, 1.0]``, and a
         **deduplicated** list of human-readable trigger descriptions.
     """
+    # Pick up any config changes (user yaml / env overrides / reloads).
+    _refresh_config()
+
     # Guard: empty / whitespace-only input.
     if not text or not text.strip():
         return "safe", 0.0, []

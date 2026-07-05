@@ -30,9 +30,14 @@ _CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 
 def load_config() -> dict:
-    """Load the package-level config.yaml (legacy, used by existing modules).
+    """Load the package-level config.yaml (DEPRECATED).
 
-    New code should use :func:`humane_proxy.config.get_config` instead.
+    .. deprecated:: 0.5.2
+        Returns only the bundled package defaults — no user
+        ``humane_proxy.yaml``, no ``HUMANE_PROXY_*`` env overrides.
+        Use :func:`humane_proxy.config.get_config` instead, which returns
+        the fully merged configuration. No internal module uses this
+        anymore; it is kept only for external backward compatibility.
     """
     with open(_CONFIG_PATH, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
