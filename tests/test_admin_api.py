@@ -179,3 +179,13 @@ class TestDeleteErasesTrajectory:
         risk = client.get("/admin/sessions/sess-1/risk", headers=self.HEADERS)
         assert risk.status_code == 200
         assert risk.json()["trajectory"]["message_count"] == 0
+
+
+class TestEmptyFilterParams:
+    HEADERS = {"Authorization": "Bearer test-admin-secret"}
+
+    def test_empty_category_param_returns_200(self, _seeded_db):
+        """/admin/escalations?category= used to 500 with a SQL binding error."""
+        resp = client.get("/admin/escalations?category=&session_id=", headers=self.HEADERS)
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 3

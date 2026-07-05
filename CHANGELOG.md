@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.2] - 2026-07-05
+
+### Fixed
+
+- **User configuration finally reaches the classifiers** — the heuristic
+  classifier and risk trajectory read config through a legacy package-only
+  loader at import time, so `heuristics:`/`trajectory:` overrides in
+  `humane_proxy.yaml` and the documented `HUMANE_PROXY_DECAY_HALF_LIFE` env
+  var were silently ignored. Both modules now rebuild their settings from the
+  merged config (`config.get_config()`) whenever it changes; the legacy
+  `humane_proxy.load_config()` is deprecated.
+- **Duplicate top-level keys removed from package `config.yaml`** — the file
+  declared `safety:` and `escalation:` twice; PyYAML silently keeps only the
+  last block, leaving the first ones as dead config.
+- **Empty-string filters no longer 500** — `GET /admin/escalations?category=`
+  desynced the SQL WHERE clause from the parameter list in the SQLite and
+  PostgreSQL stores ("incorrect number of bindings"). Empty strings are now
+  treated as "no filter".
+- **GitHub Action defaults to the `ml` extra** — `hp benchmark` runs stages
+  1+2 by default but Stage 2 silently no-ops without `sentence-transformers`,
+  so the action failed its own sample dataset in `--ci` mode when installed
+  without extras.
+
+---
+
 ## [0.5.1] - 2026-07-05
 
 ### Fixed

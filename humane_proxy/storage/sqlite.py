@@ -194,6 +194,10 @@ class SQLiteStore(EscalationStore):
         sort_order: str = "desc",
     ) -> list[dict[str, Any]]:
         """Return escalation records matching the filters."""
+        # Treat empty strings as "no filter" — otherwise the WHERE clause and
+        # the params list disagree and sqlite raises a binding-count error.
+        category = category or None
+        session_id = session_id or None
         params = self._build_params(category, session_id, date_from, date_to)
         where_key = (category is not None, session_id is not None, date_from is not None, date_to is not None)
         allowed_sort = {
@@ -222,6 +226,8 @@ class SQLiteStore(EscalationStore):
         date_to: float | None = None,
     ) -> int:
         """Return the number of matching records."""
+        category = category or None
+        session_id = session_id or None
         params = self._build_params(category, session_id, date_from, date_to)
         where_key = (category is not None, session_id is not None, date_from is not None, date_to is not None)
         conn = self._conn()

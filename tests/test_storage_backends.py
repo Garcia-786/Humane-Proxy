@@ -149,3 +149,29 @@ def test_redis_delete_session_cleans_category_index():
     zrem_keys = [call.args[0] for call in pipe.zrem.call_args_list]
     assert "humane_proxy:category:self_harm" in zrem_keys
     assert "humane_proxy:esc_timeline" in zrem_keys
+
+
+# ---------------------------------------------------------------------------
+# Empty-string filters — regression for SQL/params desync
+# ---------------------------------------------------------------------------
+
+def test_sqlite_empty_string_filters_do_not_desync(tmp_path):
+    """query(category="") used to build a WHERE clause (is-not-None check)
+    while the params builder skipped it (truthiness check), raising
+    'Incorrect number of bindings supplied' — e.g. /admin/escalations?category=."""
+    from humane_proxy.storage.sqlite import SQLiteStore
+
+    store = SQLiteStore(
+        {"storage": {"sqlite": {"path": str(tmp_path / "empty_filter.db")}},
+         "escalation": {}}
+    )
+    store.init()
+    store.log("sess-ef", "self_harm", 1.0, ["t"])
+
+    rows = store.query(category="", session_id="")
+    assert len(rows) == 1
+    assert store.count(category="", session_id="") == 1
+
+    # Real filters still work.
+    assert store.count(category="self_harm") == 1
+    assert store.count(category="criminal_intent") == 0

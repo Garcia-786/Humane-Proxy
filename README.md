@@ -449,7 +449,7 @@ jobs:
 |---|---|---|---|
 | `dataset` | ✅ | — | Path to JSON evaluation dataset |
 | `python-version` | ❌ | `3.12` | Python version to use |
-| `extra` | ❌ | `""` | pip extras (e.g., `ml` for Stage 2 embeddings) |
+| `extra` | ❌ | `ml` | pip extras. Defaults to `ml` — the benchmark runs stages 1+2 and Stage 2 needs the embeddings dependency. Pass `""` for heuristics-only |
 
 ---
 
