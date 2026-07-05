@@ -228,3 +228,34 @@ def test_toggle_does_not_affect_result():
     r2 = classify("safe msg", session_id="toggle")
 
     assert r1 == r2 == expected
+
+class TestStage1Span:
+    def test_stage1_heuristics_span_emitted(self):
+        """The documented span hierarchy includes stage1.heuristics — it must
+        actually be produced as a child of pipeline.classify."""
+        pytest.importorskip("opentelemetry.sdk")
+        from humane_proxy.telemetry import setup_telemetry_with_memory_exporter
+        from humane_proxy.classifiers.pipeline import SafetyPipeline
+
+        exporter = setup_telemetry_with_memory_exporter()
+        pipeline = SafetyPipeline({"pipeline": {"enabled_stages": [1]}})
+        pipeline.classify_sync("hello world", session_id="span-sess")
+
+        names = [s.name for s in exporter.get_finished_spans()]
+        assert "stage1.heuristics" in names
+        assert "pipeline.classify" in names
+
+    def test_session_id_attribute_present_on_root_span(self):
+        """session_id is documented as a span attribute; callers pass it as a
+        kwarg so the decorator can pick it up."""
+        pytest.importorskip("opentelemetry.sdk")
+        from humane_proxy.telemetry import setup_telemetry_with_memory_exporter
+        from humane_proxy.classifiers.pipeline import SafetyPipeline
+
+        exporter = setup_telemetry_with_memory_exporter()
+        pipeline = SafetyPipeline({"pipeline": {"enabled_stages": [1]}})
+        pipeline.classify_sync("hello world", session_id="span-attr-sess")
+
+        roots = [s for s in exporter.get_finished_spans() if s.name == "pipeline.classify"]
+        assert roots
+        assert roots[0].attributes.get("humane_proxy.session_id") == "span-attr-sess"

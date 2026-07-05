@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import httpx
 
 logger = logging.getLogger("humane_proxy.escalation.webhooks")
 

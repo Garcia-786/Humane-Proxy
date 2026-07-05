@@ -261,6 +261,7 @@ class SafetyPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
+    @traced_stage("stage1.heuristics")
     def _run_stage1(text: str) -> ClassificationResult:
         """Run the heuristic classifier and wrap in a ClassificationResult."""
         from humane_proxy.classifiers.heuristics import classify

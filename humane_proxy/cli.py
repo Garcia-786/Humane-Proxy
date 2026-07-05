@@ -287,7 +287,6 @@ def escalations(category: str | None, limit: int, session: str | None) -> None:
 def session(session_id: str) -> None:
     """Show risk trajectory and escalation history for a session."""
     from humane_proxy.storage.factory import get_store
-    from humane_proxy.risk.trajectory import analyze
 
     store = get_store()
     rows = store.query(session_id=session_id, limit=500, offset=0)

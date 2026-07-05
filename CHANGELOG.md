@@ -6,6 +6,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.4] - 2026-07-05
+
+### Performance
+
+- **Shared HTTP connection pool** — the reverse proxy, all webhook
+  dispatchers, and the three Stage-3 classifiers now reuse one process-level
+  `httpx.AsyncClient` instead of opening a fresh TCP+TLS connection per call.
+- **Embedding caches** — Stage-2 anchor sentences are encoded once per
+  process (per model) instead of per classifier instance, and a bounded
+  5-minute TTL cache serves repeated identical messages without re-encoding.
+- **Singleton pipelines** — the MCP `check_message_safety` tool and the
+  LlamaIndex/CrewAI/AutoGen integrations reuse one pipeline instead of
+  rebuilding it (including Stage-2 setup) on every tool call.
+
+### Fixed
+
+- **`stage1.heuristics` OTel span now exists** — the documented span
+  hierarchy listed it, but Stage 1 was never traced. The `session_id` span
+  attribute is now populated too (classify call sites pass it as a keyword).
+- `to_dict()` now includes `should_escalate`, matching the MCP tool's
+  documented return shape.
+- FastAPI app version is derived from `humane_proxy.__version__` instead of
+  a hardcoded string.
+- `requirements.txt` was missing `numpy` (already a core dependency in
+  `pyproject.toml`); removed dead imports left by the shared-client refactor.
+
+---
+
 ## [0.5.3] - 2026-07-05
 
 ### Fixed

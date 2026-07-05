@@ -121,7 +121,7 @@ if _MCP_AVAILABLE:
             ``{"safe": bool, "category": str, "score": float, "triggers": list,
                "stage_reached": int, "should_escalate": bool, ...}``
         """
-        result = await _get_pipeline().classify(message, session_id)
+        result = await _get_pipeline().classify(message, session_id=session_id)
         return result.to_dict()
 
     @mcp.tool()

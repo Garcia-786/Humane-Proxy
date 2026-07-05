@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from humane_proxy import __version__
 from humane_proxy.telemetry import setup_telemetry
 from humane_proxy.escalation.local_db import init_db
 from humane_proxy.escalation.router import escalate, get_self_harm_response
@@ -67,7 +68,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="HumaneProxy",
-    version="0.5.3",
+    version=__version__,
     description="Lightweight AI safety middleware that protects humans.",
     lifespan=_lifespan,
 )
@@ -132,7 +133,7 @@ async def chat(request: Request) -> JSONResponse:
         )
 
     pipeline = _get_pipeline()
-    result = await pipeline.classify(user_message, session_id)
+    result = await pipeline.classify(user_message, session_id=session_id)
 
     if result.should_escalate:
         cls = result.classification

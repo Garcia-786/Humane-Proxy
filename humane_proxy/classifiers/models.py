@@ -85,6 +85,7 @@ class PipelineResult:
             "score": round(self.classification.score, 4),
             "triggers": self.classification.triggers,
             "stage_reached": self.classification.stage,
+            "should_escalate": self.should_escalate,
         }
         if self.classification.reasoning:
             result["reasoning"] = self.classification.reasoning

@@ -25,7 +25,6 @@ import json
 import logging
 import os
 
-import httpx
 
 from humane_proxy.classifiers.models import ClassificationResult
 from humane_proxy.classifiers.stage3.base import Stage3Classifier

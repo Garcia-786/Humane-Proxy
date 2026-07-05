@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 # ---------------------------------------------------------------------------
 # Legacy API — keep backward compatibility with existing modules that call
@@ -103,7 +103,7 @@ class HumaneProxy:
             ``{"safe": bool, "category": str, "score": float, "triggers": list,
                "stage_reached": int, ...}``
         """
-        result = self._pipeline.classify_sync(text, session_id)
+        result = self._pipeline.classify_sync(text, session_id=session_id)
         return result.to_dict()
 
     async def check_async(self, text: str, session_id: str = "programmatic") -> dict:
@@ -115,7 +115,7 @@ class HumaneProxy:
             Same as :meth:`check`, but potentially enriched with Stage-3
             reasoning and higher accuracy.
         """
-        result = await self._pipeline.classify(text, session_id)
+        result = await self._pipeline.classify(text, session_id=session_id)
         return result.to_dict()
 
     def as_fastapi_app(self):
