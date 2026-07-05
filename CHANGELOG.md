@@ -6,6 +6,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.5] - 2026-07-06
+
+### Changed
+
+- **Context reducers are now span-aware** — a keyword and an intent pattern
+  firing on the *same phrase* count as one signal, so reducers can neutralize
+  false positives like "how to make a bomb in minecraft" (previously scored
+  1.0 because two triggers disabled reduction). Two or more *separate*
+  harmful expressions in one message still disable reduction entirely.
+- **The audit log is exempt from the alert rate limit** — every escalation is
+  now persisted; `escalation.rate_limit_max` only caps operator alerts
+  (webhooks + CRITICAL log) per session per window. Previously events past
+  the quota were dropped entirely, blinding the audit trail for exactly the
+  sessions escalating hardest. `escalate()` results gain an `alerted` field.
+
+### Security
+
+- **Webhook URLs and response bodies no longer leak into logs** (#33) —
+  logs show only the webhook's scheme + host (Slack/Discord/Teams tokens
+  live in the URL path), and error logs record status + length with bodies
+  demoted to `DEBUG`.
+- **Raw upstream LLM bodies are no longer echoed to clients** (#33) —
+  non-JSON upstream responses return a generic error; the body is available
+  at `DEBUG` for operators.
+
+### Fixed
+
+- `.env.example` and the `humane-proxy init` scaffold now include the
+  documented `OPENAI_API_KEY`, `GROQ_API_KEY`, and `HUMANE_PROXY_ADMIN_KEY`
+  secrets with purpose comments (#63).
+- **Malformed pipeline config no longer crashes classification** — a
+  non-list `enabled_stages` (string/None) falls back to `[1]`, junk entries
+  are filtered out, and non-numeric thresholds coerce to safe defaults, all
+  with logged warnings. The three long-standing `xfail` config-validation
+  tests are now regular passes.
+
+---
+
 ## [0.5.4] - 2026-07-05
 
 ### Performance

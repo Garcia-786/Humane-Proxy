@@ -59,14 +59,32 @@ class SafetyPipeline:
         self._config = config
         pipeline_cfg = config.get("pipeline", {})
         safety_cfg = config.get("safety", {})
+        if not isinstance(pipeline_cfg, dict):
+            logger.warning("Invalid 'pipeline' config section %r — using defaults", pipeline_cfg)
+            pipeline_cfg = {}
+        if not isinstance(safety_cfg, dict):
+            logger.warning("Invalid 'safety' config section %r — using defaults", safety_cfg)
+            safety_cfg = {}
 
-        self.enabled_stages: list[int] = pipeline_cfg.get("enabled_stages", [1])
-        self.stage1_ceiling: float = pipeline_cfg.get("stage1_ceiling", 0.3)
-        self.stage2_ceiling: float = pipeline_cfg.get("stage2_ceiling", 0.4)
-        self.spike_boost: float = safety_cfg.get("spike_boost", 0.25)
-        self.risk_threshold: float = safety_cfg.get("risk_threshold", 0.7)
-        self.store_message_text: bool = config.get("privacy", {}).get(
-            "store_message_text", False
+        # Malformed values fall back to safe defaults instead of raising —
+        # a broken config must never take the safety pipeline down.
+        self.enabled_stages: list[int] = self._validate_stages(
+            pipeline_cfg.get("enabled_stages", [1])
+        )
+        self.stage1_ceiling: float = self._as_float(
+            pipeline_cfg.get("stage1_ceiling", 0.3), 0.3, "pipeline.stage1_ceiling"
+        )
+        self.stage2_ceiling: float = self._as_float(
+            pipeline_cfg.get("stage2_ceiling", 0.4), 0.4, "pipeline.stage2_ceiling"
+        )
+        self.spike_boost: float = self._as_float(
+            safety_cfg.get("spike_boost", 0.25), 0.25, "safety.spike_boost"
+        )
+        self.risk_threshold: float = self._as_float(
+            safety_cfg.get("risk_threshold", 0.7), 0.7, "safety.risk_threshold"
+        )
+        self.store_message_text: bool = bool(
+            config.get("privacy", {}).get("store_message_text", False)
         )
 
         # Stage 2: embedding classifier.
@@ -84,6 +102,40 @@ class SafetyPipeline:
     # ------------------------------------------------------------------
     # Initialisation helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_stages(raw: Any) -> list[int]:
+        """Sanitize ``enabled_stages`` — non-list values fall back to ``[1]``.
+
+        List/tuple input is filtered to the valid stage numbers (1-3),
+        deduplicated, order-preserved; an explicitly empty list stays empty
+        (it means "classify nothing", which is allowed).
+        """
+        if isinstance(raw, (list, tuple)):
+            stages: list[int] = []
+            for item in raw:
+                try:
+                    num = int(item)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring invalid stage %r in enabled_stages", item)
+                    continue
+                if num in (1, 2, 3) and num not in stages:
+                    stages.append(num)
+            return stages
+        logger.warning(
+            "Invalid pipeline.enabled_stages=%r (expected a list) — falling back to [1]",
+            raw,
+        )
+        return [1]
+
+    @staticmethod
+    def _as_float(raw: Any, default: float, name: str) -> float:
+        """Coerce a config value to float, falling back to *default*."""
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s=%r — using default %s", name, raw, default)
+            return default
 
     def _init_stage2(self) -> None:
         """Instantiate the embedding classifier (lazy model load)."""
@@ -341,7 +393,13 @@ class SafetyPipeline:
 
         # Self-harm threshold-aware override.
         self_harm_cfg = self._config.get("safety", {}).get("categories", {}).get("self_harm", {})
-        self_harm_threshold = self_harm_cfg.get("escalate_threshold", 0.5)
+        if not isinstance(self_harm_cfg, dict):
+            self_harm_cfg = {}
+        self_harm_threshold = self._as_float(
+            self_harm_cfg.get("escalate_threshold", 0.5),
+            0.5,
+            "safety.categories.self_harm.escalate_threshold",
+        )
 
         if result.category == "self_harm":
             if result.score >= self_harm_threshold:
