@@ -6,6 +6,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.0] - 2026-07-05
+
+### Added
+
+- **OpenTelemetry distributed tracing** (closes #7) — new `[telemetry]` install extra, `telemetry.py` module owning all OTel logic, `@traced_stage` spans across the 3-stage pipeline, `HUMANE_PROXY_TELEMETRY_ENABLED` env override, zero-overhead no-op tracer when disabled, and a README section with Jaeger validation steps.
+- **Region-aware care response** — optional `safety.categories.self_harm.region` (ISO country code) surfaces that country's crisis resources first in block mode while keeping the full international list.
+- **Crisis helplines for 10 new countries** (#26) — Japan, South Korea, Spain, Italy, Mexico, New Zealand and more, alongside the existing US/IN/GB/AU/CA/DE/FR/BR/ZA resources.
+- **Web dashboard template** — initial `dashboard/` scaffold (template + logo) for a future escalations UI.
+- **Date filtering and sorting** for escalation queries — `EscalationStore.query()`/`count()` extended with `date_from`, `date_to`, `sort_by`, `sort_order` across SQLite, Redis, and PostgreSQL backends.
+- Table of contents in README.
+- Test coverage: heuristic edge cases (Unicode, leet-speak, boundary scoring — #11), pipeline config validation (#35), malformed `/chat` payloads, `_extract_last_user_message` multimodal cases, `_weighted_mean` edge cases (#60).
+
+### Fixed
+
+- **Storage-backend bypass** (#37) — admin API, CLI, and MCP tools now route through `get_store()` instead of direct SQLite calls, so Redis/Postgres deployments see consistent data everywhere.
+- **Multimodal content arrays** (#44, #45, #48) — `/chat` now extracts text parts from OpenAI-style content arrays and no longer crashes on string or malformed message content.
+- Empty request body on `/chat` returns a clean 400 instead of an unhandled error (#41).
+- CodeQL SQL-injection alerts resolved via statically generated SQL templates; timezone conversion bug and CSV `triggers` serialization fixed in escalation export.
+
+### Security
+
+- **Timing-attack fix** in admin authentication — Bearer token comparison now uses `hmac.compare_digest` (#18, #21).
+- **Hardened HTTP MCP** — binds to `127.0.0.1` by default, warns on public binds without a token, optional Bearer auth via `HUMANE_PROXY_ADMIN_KEY`, and bounded/validated `list_recent_escalations` queries (#17).
+
+### Docs
+
+- Architecture diagram replaced with Mermaid.js flowchart, including corrected Stage-1 transition labels (#4).
+
+---
+
 ## [0.4.0] - 2026-04-18
 
 ### Added
