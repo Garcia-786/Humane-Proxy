@@ -231,3 +231,34 @@ class TestEnvReadAtRequestTime:
         assert resp.json() == {"ok": True}
         assert mock_post.call_args.args[0] == "https://upstream.example/v1/chat"
         assert mock_post.call_args.kwargs["headers"]["Authorization"] == "Bearer sk-test"
+
+
+class TestNoRawUpstreamBodies:
+    """Non-JSON upstream responses must not be echoed to clients (#33)."""
+
+    def test_raw_field_absent_from_error_response(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from fastapi.testclient import TestClient
+        from humane_proxy.middleware import interceptor
+
+        monkeypatch.setenv("LLM_API_URL", "https://upstream.example/v1/chat")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test")
+
+        upstream = MagicMock()
+        upstream.status_code = 502
+        upstream.json.side_effect = ValueError("not json")
+        upstream.text = "<html>internal gateway secrets</html>"
+
+        client = TestClient(interceptor.app, raise_server_exceptions=False)
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=upstream):
+            resp = client.post("/chat", json={
+                "session_id": "raw-body-sess",
+                "messages": [{"role": "user", "content": "hello there"}],
+            })
+
+        assert resp.status_code == 502
+        body = resp.json()
+        assert "raw" not in body
+        assert "gateway secrets" not in resp.text
+        assert body["status"] == "error"

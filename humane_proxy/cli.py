@@ -130,8 +130,18 @@ _DEFAULT_ENV_CONTENT = """\
 #   set -a; source .env; set +a        (bash/zsh)
 # or inject it via your process manager / docker --env-file.
 
+# Upstream LLM (required for the reverse proxy server only).
 LLM_API_KEY=
 LLM_API_URL=
+
+# Stage-3 reasoning providers (optional — enables the third pipeline stage).
+# "auto" provider detection checks OPENAI_API_KEY first, then GROQ_API_KEY.
+# OPENAI_API_KEY=sk-...
+# GROQ_API_KEY=gsk_...
+
+# Admin API / HTTP MCP bearer token (optional).
+# Secures the /admin REST endpoints and HTTP-mode MCP tool access.
+# HUMANE_PROXY_ADMIN_KEY=your-secret-token
 
 # Optional overrides (uncomment to use):
 # HUMANE_PROXY_PORT=8000

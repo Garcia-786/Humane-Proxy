@@ -205,10 +205,16 @@ async def chat(request: Request) -> JSONResponse:
         try:
             body = llm_response.json()
         except (ValueError, TypeError):
+            # Never forward raw upstream bodies to clients — they can carry
+            # sensitive or unexpected content (issue #33).  Operators can
+            # enable DEBUG logging to inspect the payload.
+            logger.debug(
+                "Upstream non-JSON body (HTTP %d): %s",
+                llm_response.status_code, llm_response.text[:500],
+            )
             body = {
                 "status": "error",
                 "message": f"Upstream returned non-JSON (HTTP {llm_response.status_code}).",
-                "raw": llm_response.text[:500],
             }
         return JSONResponse(status_code=llm_response.status_code, content=body)
 

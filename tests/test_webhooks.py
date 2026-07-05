@@ -75,3 +75,59 @@ class TestDispatch:
         with patch("humane_proxy.escalation.webhooks.send_slack", new_callable=AsyncMock) as mock:
             await dispatch_webhooks(config, "sess-1", 0.9, ["t1"], "self_harm")
             mock.assert_called_once()
+
+
+class TestUrlSanitization:
+    """Webhook URLs carry routing tokens — logs must only show the host (#33)."""
+
+    def test_sanitize_strips_path_query_fragment(self):
+        from humane_proxy.escalation.webhooks import _sanitize_url
+
+        url = "https://hooks.slack.com/services/T0000/B0000/SECRETTOKEN?x=1#frag"
+        assert _sanitize_url(url) == "https://hooks.slack.com"
+
+    def test_sanitize_strips_userinfo(self):
+        from humane_proxy.escalation.webhooks import _sanitize_url
+
+        assert _sanitize_url("https://user:pass@example.com/hook") == "https://example.com"
+
+    def test_sanitize_handles_garbage(self):
+        from humane_proxy.escalation.webhooks import _sanitize_url
+
+        assert _sanitize_url("not a url at all") == "<invalid-url>"
+        assert _sanitize_url("") == "<invalid-url>"
+
+    async def test_error_logs_never_contain_token(self, caplog):
+        import logging
+        from unittest.mock import AsyncMock, MagicMock
+        from humane_proxy.escalation.webhooks import _post
+
+        url = "https://hooks.slack.com/services/T0000/B0000/SECRETTOKEN"
+        resp = MagicMock()
+        resp.status_code = 400
+        resp.text = "invalid_payload SECRETBODY"
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=resp):
+            with caplog.at_level(logging.WARNING, logger="humane_proxy.escalation.webhooks"):
+                await _post(url, {"k": "v"})
+
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "SECRETTOKEN" not in joined
+        assert "SECRETBODY" not in joined
+        assert "hooks.slack.com" in joined
+        assert "400" in joined
+
+    async def test_exception_logs_never_contain_token(self, caplog):
+        import logging
+        from unittest.mock import AsyncMock
+        from humane_proxy.escalation.webhooks import _post
+
+        url = "https://discord.com/api/webhooks/12345/SECRETTOKEN"
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   side_effect=Exception("boom")):
+            with caplog.at_level(logging.WARNING, logger="humane_proxy.escalation.webhooks"):
+                await _post(url, {"k": "v"})
+
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "SECRETTOKEN" not in joined
+        assert "discord.com" in joined

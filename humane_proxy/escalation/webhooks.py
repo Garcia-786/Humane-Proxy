@@ -11,9 +11,26 @@ import smtplib
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import urlparse
 
 
 logger = logging.getLogger("humane_proxy.escalation.webhooks")
+
+
+def _sanitize_url(url: str) -> str:
+    """Return only scheme + host of *url* for safe logging.
+
+    Slack/Discord/Teams webhook URLs carry routing tokens in their path,
+    so the path, query, fragment, and any userinfo must never be logged
+    (issue #33).  The host alone still identifies which integration failed.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.hostname:
+            return f"{parsed.scheme}://{parsed.hostname}"
+    except ValueError:
+        pass
+    return "<invalid-url>"
 
 
 async def _post(url: str, payload: dict, *, headers: dict | None = None) -> None:
@@ -26,12 +43,15 @@ async def _post(url: str, payload: dict, *, headers: dict | None = None) -> None
             url, json=payload, headers=headers or {}, timeout=10.0
         )
         if resp.status_code >= 400:
+            # Response bodies can echo the request or contain provider
+            # details — log only status + length; full body at DEBUG.
             logger.warning(
-                "Webhook %s returned HTTP %d: %s",
-                url[:60], resp.status_code, resp.text[:200],
+                "Webhook %s returned HTTP %d (len=%d)",
+                _sanitize_url(url), resp.status_code, len(resp.text),
             )
+            logger.debug("Webhook error body: %s", resp.text[:500])
     except Exception:
-        logger.exception("Webhook dispatch to %s failed", url[:60])
+        logger.exception("Webhook dispatch to %s failed", _sanitize_url(url))
 
 
 # ---------------------------------------------------------------------------
