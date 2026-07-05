@@ -199,3 +199,35 @@ class TestExtractLastUserMessage:
             ]
         }
         assert _extract_last_user_message(payload) == "Valid"
+
+
+class TestEnvReadAtRequestTime:
+    """LLM_API_URL/KEY used to be read at import time, so setting them after
+    the module loaded (the normal case when following the README) had no
+    effect until the process restarted."""
+
+    def test_llm_url_set_after_import_is_honored(self, monkeypatch):
+        import json
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from fastapi.testclient import TestClient
+        from humane_proxy.middleware import interceptor
+
+        monkeypatch.setenv("LLM_API_URL", "https://upstream.example/v1/chat")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"ok": True}
+
+        client = TestClient(interceptor.app, raise_server_exceptions=False)
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=mock_resp) as mock_post:
+            resp = client.post("/chat", json={
+                "session_id": "env-late",
+                "messages": [{"role": "user", "content": "hello there"}],
+            })
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert mock_post.call_args.args[0] == "https://upstream.example/v1/chat"
+        assert mock_post.call_args.kwargs["headers"]["Authorization"] == "Bearer sk-test"

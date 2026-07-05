@@ -124,6 +124,11 @@ escalation:
 _DEFAULT_ENV_CONTENT = """\
 # HumaneProxy environment variables.
 # Rename this file to .env and fill in your values.
+#
+# NOTE: HumaneProxy does NOT auto-load .env files. Load it into your
+# environment before `humane-proxy start`, e.g.:
+#   set -a; source .env; set +a        (bash/zsh)
+# or inject it via your process manager / docker --env-file.
 
 LLM_API_KEY=
 LLM_API_URL=
@@ -168,8 +173,10 @@ def init() -> None:
         click.echo(f"\n  ✅ Created: {', '.join(created)}")
         click.echo("\n  Next steps:")
         click.echo("    1. Copy .env.example → .env and fill in your LLM_API_KEY / LLM_API_URL")
-        click.echo("    2. Edit humane_proxy.yaml to customise thresholds & keywords")
-        click.echo("    3. Run: humane-proxy start")
+        click.echo("    2. Load it into your environment (HumaneProxy does not auto-load .env):")
+        click.echo("         set -a; source .env; set +a")
+        click.echo("    3. Edit humane_proxy.yaml to customise thresholds & keywords")
+        click.echo("    4. Run: humane-proxy start")
     else:
         click.echo("\n  ℹ  Nothing to create — files already exist.")
 

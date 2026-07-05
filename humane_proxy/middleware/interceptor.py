@@ -19,9 +19,6 @@ from json import JSONDecodeError
 
 logger = logging.getLogger("humane_proxy")
 
-LLM_API_KEY: str = os.environ.get("LLM_API_KEY", "")
-LLM_API_URL: str = os.environ.get("LLM_API_URL", "")
-
 _pipeline = None
 
 
@@ -177,21 +174,25 @@ async def chat(request: Request) -> JSONResponse:
             )
 
     # Safe (or forward mode) — forward to upstream LLM.
-    if not LLM_API_URL:
+    # Read at request time (not import time) so the vars work no matter
+    # when or how they are set — e.g. exported after the app module loads.
+    llm_api_url = os.environ.get("LLM_API_URL", "")
+    llm_api_key = os.environ.get("LLM_API_KEY", "")
+    if not llm_api_url:
         return JSONResponse(
             status_code=503,
             content={"status": "error", "message": "LLM_API_URL is not configured."},
         )
 
     headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Authorization": f"Bearer {llm_api_key}",
         "Content-Type": "application/json",
     }
 
     try:
         async with httpx.AsyncClient() as client:
             llm_response = await client.post(
-                LLM_API_URL, headers=headers, json=payload, timeout=30.0
+                llm_api_url, headers=headers, json=payload, timeout=30.0
             )
         try:
             body = llm_response.json()

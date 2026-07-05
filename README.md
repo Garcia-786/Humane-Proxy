@@ -64,11 +64,16 @@ pip install humane-proxy
 humane-proxy init
 
 # Start the reverse proxy server
-# (requires LLM_API_KEY and LLM_API_URL in .env — these point to your upstream LLM)
+# (requires the LLM_API_KEY and LLM_API_URL environment variables —
+#  these point to your upstream LLM)
+export LLM_API_KEY=sk-...
+export LLM_API_URL=https://api.your-llm.com/v1/chat/completions
 humane-proxy start
 ```
 
 > **Note:** `LLM_API_KEY` and `LLM_API_URL` are only needed for the reverse proxy server (`humane-proxy start`). They tell HumaneProxy where to forward safe messages. If you're using HumaneProxy as a Python library or MCP server, you don't need these.
+>
+> HumaneProxy does **not** auto-load `.env` files. If you keep these values in the `.env` scaffolded by `humane-proxy init`, load it into the environment yourself — e.g. `set -a; source .env; set +a` on Unix shells, or run via a process manager / `docker --env-file` that injects it.
 
 ### As a Python library
 
