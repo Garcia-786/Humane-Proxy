@@ -51,3 +51,6 @@ coverage.xml
 mcp-publisher.exe
 mcp-publisher
 .mcpregistry_*
+
+# Maintainer notes
+notes/
