@@ -264,8 +264,8 @@ def _fire_webhooks(
         has_any = any(
             webhooks.get(k)
             for k in ("slack_url", "discord_url", "pagerduty_routing_key",
-                       "teams_url", "email_to")
-        )
+                       "teams_url")
+        ) or bool((webhooks.get("email") or {}).get("to"))
         if not has_any:
             return
 

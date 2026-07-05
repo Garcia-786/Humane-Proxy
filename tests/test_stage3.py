@@ -231,3 +231,64 @@ class TestOpenAIChat:
         with patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=Exception("boom")):
             result = await cls.classify("test", prior)
             assert "stage3_error" in result.triggers
+
+
+# -----------------------------------------------------------------------
+# LlamaGuard category mapping regressions
+# -----------------------------------------------------------------------
+
+class TestLlamaGuardMapping:
+    """Regressions for the S-code -> HumaneProxy category map."""
+
+    def _make(self):
+        from humane_proxy.classifiers.stage3.llamaguard import LlamaGuardClassifier
+        return LlamaGuardClassifier({})
+
+    def _mock_resp(self, content: str):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"choices": [{"message": {"content": content}}]}
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    @pytest.mark.asyncio
+    async def test_s9_indiscriminate_weapons_is_criminal(self):
+        """S9 (Indiscriminate Weapons) used to be mapped to 'safe'."""
+        cls = self._make()
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=self._mock_resp("unsafe\nS9")):
+            result = await cls.classify("chemical weapon synthesis", ClassificationResult())
+            assert result.category == "criminal_intent"
+            assert result.score > 0.0
+
+    @pytest.mark.asyncio
+    async def test_s10_hate_is_not_self_harm(self):
+        """S10 (Hate) used to map to self_harm, sending hate speech a
+        suicide-crisis care response with score forced to 1.0."""
+        cls = self._make()
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=self._mock_resp("unsafe\nS10")):
+            result = await cls.classify("hateful message", ClassificationResult())
+            assert result.category != "self_harm"
+            assert result.score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_unsafe_without_codes_scores_zero(self):
+        """A bare 'unsafe' with no S-codes used to return safe with 0.85,
+        silently inflating the combined pipeline score."""
+        cls = self._make()
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=self._mock_resp("unsafe")):
+            result = await cls.classify("something", ClassificationResult())
+            assert result.category == "safe"
+            assert result.score == 0.0
+            assert "llamaguard:unsafe_out_of_scope" in result.triggers
+
+    @pytest.mark.asyncio
+    async def test_out_of_scope_codes_score_zero(self):
+        """Codes outside our domain (privacy/IP) must not inflate the score."""
+        cls = self._make()
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=self._mock_resp("unsafe\nS7,S8")):
+            result = await cls.classify("privacy question", ClassificationResult())
+            assert result.category == "safe"
+            assert result.score == 0.0
