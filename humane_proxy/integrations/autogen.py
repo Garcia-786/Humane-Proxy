@@ -26,6 +26,18 @@ from typing import Any
 
 logger = logging.getLogger("humane_proxy.integrations.autogen")
 
+_proxy = None
+
+
+def _get_proxy():
+    """Return the process-level HumaneProxy singleton (avoids rebuilding
+    the whole pipeline — and Stage-2 setup — on every tool call)."""
+    global _proxy
+    if _proxy is None:
+        from humane_proxy import HumaneProxy
+        _proxy = HumaneProxy()
+    return _proxy
+
 
 # ---------------------------------------------------------------------------
 # Tool functions — these are the raw callables that AutoGen will invoke.
@@ -43,10 +55,7 @@ def check_message_safety(message: str, session_id: str = "autogen-default") -> s
     Returns:
         JSON string with safety verdict, category, score, and triggers.
     """
-    from humane_proxy import HumaneProxy
-
-    proxy = HumaneProxy()
-    result = proxy.check(message, session_id=session_id)
+    result = _get_proxy().check(message, session_id=session_id)
     return json.dumps(result, indent=2)
 
 

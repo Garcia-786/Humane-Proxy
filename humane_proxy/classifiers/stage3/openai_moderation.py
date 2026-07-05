@@ -56,11 +56,14 @@ class OpenAIModerationClassifier(Stage3Classifier):
         payload = {"input": text}
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    self._api_url, json=payload, headers=headers
-                )
-                resp.raise_for_status()
+            from humane_proxy.http_client import get_async_client
+
+            client = get_async_client()
+            resp = await client.post(
+                self._api_url, json=payload, headers=headers,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
 
             body = resp.json()
             return self._parse_response(body)

@@ -20,13 +20,17 @@ logger = logging.getLogger("humane_proxy.escalation.webhooks")
 async def _post(url: str, payload: dict, *, headers: dict | None = None) -> None:
     """POST JSON to *url*, swallowing all errors."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload, headers=headers or {})
-            if resp.status_code >= 400:
-                logger.warning(
-                    "Webhook %s returned HTTP %d: %s",
-                    url[:60], resp.status_code, resp.text[:200],
-                )
+        from humane_proxy.http_client import get_async_client
+
+        client = get_async_client()
+        resp = await client.post(
+            url, json=payload, headers=headers or {}, timeout=10.0
+        )
+        if resp.status_code >= 400:
+            logger.warning(
+                "Webhook %s returned HTTP %d: %s",
+                url[:60], resp.status_code, resp.text[:200],
+            )
     except Exception:
         logger.exception("Webhook dispatch to %s failed", url[:60])
 

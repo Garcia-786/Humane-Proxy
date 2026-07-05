@@ -75,6 +75,24 @@ except ImportError:
 # MCP app instance
 # ---------------------------------------------------------------------------
 
+_pipeline = None
+
+
+def _get_pipeline():
+    """Return the process-level SafetyPipeline singleton.
+
+    Previously every ``check_message_safety`` call constructed a fresh
+    ``SafetyPipeline`` (and with Stage 2 enabled, re-encoded the anchor
+    sentences) — hundreds of milliseconds of avoidable per-call setup.
+    """
+    global _pipeline
+    if _pipeline is None:
+        from humane_proxy.config import get_config
+        from humane_proxy.classifiers.pipeline import SafetyPipeline
+        _pipeline = SafetyPipeline(get_config())
+    return _pipeline
+
+
 if _MCP_AVAILABLE:
     auth_provider = _get_mcp_auth_provider()
     mcp_kwargs = {"auth": auth_provider} if auth_provider is not None else {}
@@ -103,12 +121,7 @@ if _MCP_AVAILABLE:
             ``{"safe": bool, "category": str, "score": float, "triggers": list,
                "stage_reached": int, "should_escalate": bool, ...}``
         """
-        from humane_proxy.config import get_config
-        from humane_proxy.classifiers.pipeline import SafetyPipeline
-
-        config = get_config()
-        pipeline = SafetyPipeline(config)
-        result = await pipeline.classify(message, session_id)
+        result = await _get_pipeline().classify(message, session_id)
         return result.to_dict()
 
     @mcp.tool()

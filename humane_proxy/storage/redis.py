@@ -22,9 +22,9 @@ except ImportError:
     _REDIS_AVAILABLE = False
     _redis = None  # type: ignore[assignment]
 
-# Atomic rate-limit check-and-increment (see notes/OPTIMIZATION.md #3).
-# Runs inside Redis' single-threaded event loop, so concurrent workers can
-# never read the same counter value before either increments it.
+# Atomic rate-limit check-and-increment.  Runs inside Redis' single-threaded
+# event loop, so concurrent workers can never read the same counter value
+# before either increments it.
 # KEYS[1] = rate key, ARGV[1] = window seconds.  Returns the new count.
 _RATE_LIMIT_LUA = """
 local current = redis.call('INCR', KEYS[1])

@@ -21,6 +21,18 @@ from typing import Any, Type
 
 logger = logging.getLogger("humane_proxy.integrations.crewai")
 
+_proxy = None
+
+
+def _get_proxy():
+    """Return the process-level HumaneProxy singleton (avoids rebuilding
+    the whole pipeline — and Stage-2 setup — on every tool call)."""
+    global _proxy
+    if _proxy is None:
+        from humane_proxy import HumaneProxy
+        _proxy = HumaneProxy()
+    return _proxy
+
 
 def get_safety_tools() -> list:
     """Return HumaneProxy safety tools as CrewAI BaseTool instances.
@@ -78,11 +90,9 @@ def get_safety_tools() -> list:
         args_schema: Type[BaseModel] = CheckMessageInput
 
         def _run(self, message: str, session_id: str = "crewai-default") -> str:
-            from humane_proxy import HumaneProxy
             import json
 
-            proxy = HumaneProxy()
-            result = proxy.check(message, session_id=session_id)
+            result = _get_proxy().check(message, session_id=session_id)
             return json.dumps(result, indent=2)
 
     class GetSessionRiskTool(BaseTool):

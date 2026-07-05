@@ -28,9 +28,13 @@ so the pipeline gracefully degrades to Stage 1 only.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import logging
 import os
 import threading
+import time
+from collections import OrderedDict
 from typing import Any
 from humane_proxy.telemetry import traced_stage
 from humane_proxy.classifiers.models import ClassificationResult
@@ -56,6 +60,50 @@ except ImportError:
 # ---------------------------------------------------------------------------
 _model_cache: dict[str, Any] = {}
 _model_lock = threading.Lock()
+
+# Anchor embeddings, keyed by model name.  The anchor sentences are static,
+# so encoding them once per process is enough — previously every
+# EmbeddingClassifier instance re-encoded all ~26 anchors, which made
+# per-call pipeline construction (MCP tools, integrations) very expensive.
+# Value: (anchor_embeddings_by_category, benign_embeddings).
+_anchor_cache: dict[str, tuple[dict[str, Any], Any]] = {}
+
+# TTL result cache.  The model is deterministic, so identical messages
+# within the TTL are served from memory instead of re-encoding
+# (~0.01 ms vs ~100+ ms).  Keyed on
+# (model name, scoring-config fingerprint, sha256(text)) so a config
+# change never serves results computed under old thresholds; bounded
+# LRU with per-entry expiry.
+_RESULT_CACHE_MAX = 1024
+_RESULT_CACHE_TTL_S = 300.0
+_result_cache: OrderedDict[tuple, tuple[float, ClassificationResult]] = OrderedDict()
+_result_cache_lock = threading.Lock()
+
+
+def _result_cache_get(key: tuple) -> ClassificationResult | None:
+    with _result_cache_lock:
+        entry = _result_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, result = entry
+        if time.monotonic() >= expires_at:
+            del _result_cache[key]
+            return None
+        _result_cache.move_to_end(key)
+        # Copy — later pipeline stages merge/append triggers, and the
+        # cached instance must stay pristine.
+        return dataclasses.replace(result, triggers=list(result.triggers))
+
+
+def _result_cache_put(key: tuple, result: ClassificationResult) -> None:
+    with _result_cache_lock:
+        _result_cache[key] = (
+            time.monotonic() + _RESULT_CACHE_TTL_S,
+            dataclasses.replace(result, triggers=list(result.triggers)),
+        )
+        _result_cache.move_to_end(key)
+        while len(_result_cache) > _RESULT_CACHE_MAX:
+            _result_cache.popitem(last=False)
 
 # ---------------------------------------------------------------------------
 # Anchor sentences — diverse, realistic expressions of each category.
@@ -186,6 +234,7 @@ class EmbeddingClassifier:
     def __init__(self, config: dict) -> None:
         self._config: dict = config.get("stage2", {})
         self._model: Any = None
+        self._model_name: str = ""
         self._anchor_embeddings: dict[str, Any] = {}
         self._benign_embeddings: Any = None
         self._loaded: bool = False
@@ -208,20 +257,30 @@ class EmbeddingClassifier:
             )
             return
 
-        model_name = self._config.get("model", "all-MiniLM-L6-v2")
-        self._model = _load_model_singleton(model_name)
+        self._model_name = self._config.get("model", "all-MiniLM-L6-v2")
+        self._model = _load_model_singleton(self._model_name)
         if self._model is not None:
             self._precompute_anchors()
 
     def _precompute_anchors(self) -> None:
-        """Encode all anchor sentences and cache the vectors."""
-        for category, sentences in ANCHORS.items():
-            self._anchor_embeddings[category] = self._model.encode(
-                sentences, show_progress_bar=False,
-            )
-        self._benign_embeddings = self._model.encode(
-            BENIGN_ANCHORS, show_progress_bar=False,
-        )
+        """Encode all anchor sentences once per process (per model)."""
+        cached = _anchor_cache.get(self._model_name)
+        if cached is None:
+            with _model_lock:
+                cached = _anchor_cache.get(self._model_name)
+                if cached is None:
+                    anchor_embeddings = {
+                        category: self._model.encode(
+                            sentences, show_progress_bar=False,
+                        )
+                        for category, sentences in ANCHORS.items()
+                    }
+                    benign_embeddings = self._model.encode(
+                        BENIGN_ANCHORS, show_progress_bar=False,
+                    )
+                    cached = (anchor_embeddings, benign_embeddings)
+                    _anchor_cache[self._model_name] = cached
+        self._anchor_embeddings, self._benign_embeddings = cached
         
     @traced_stage("stage2.embeddings")
     def classify(self, text: str) -> ClassificationResult:
@@ -234,6 +293,19 @@ class EmbeddingClassifier:
 
         if self._model is None:
             return ClassificationResult(stage=2)
+
+        # TTL cache: identical messages within the window skip the encoder.
+        cache_key = (
+            self._model_name,
+            self._config.get("safe_threshold", 0.35),
+            self._config.get("ambiguity_low", 0.30),
+            self._config.get("ambiguity_high", 0.55),
+            self._config.get("ambiguity_margin", 0.05),
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        cached_result = _result_cache_get(cache_key)
+        if cached_result is not None:
+            return cached_result
 
         # Encode the query text.
         query_vec = self._model.encode([text], show_progress_bar=False)[0]
@@ -253,7 +325,9 @@ class EmbeddingClassifier:
 
         threshold = self._config.get("safe_threshold", 0.35)
         if best_score < threshold:
-            return ClassificationResult(category="safe", score=0.0, stage=2)
+            result = ClassificationResult(category="safe", score=0.0, stage=2)
+            _result_cache_put(cache_key, result)
+            return result
 
         # Normalise to [0, 1].
         normalised = max(0.0, min(1.0, best_score))
@@ -284,9 +358,11 @@ class EmbeddingClassifier:
                 normalised *= 0.5
                 triggers.append("embedding:ambiguity_dampened")
 
-        return ClassificationResult(
+        result = ClassificationResult(
             category=best_cat,
             score=normalised,
             triggers=triggers,
             stage=2,
         )
+        _result_cache_put(cache_key, result)
+        return result

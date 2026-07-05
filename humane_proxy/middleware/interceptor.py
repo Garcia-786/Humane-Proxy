@@ -51,6 +51,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        # Close the shared upstream HTTP connection pool.
+        from humane_proxy.http_client import aclose
+        await aclose()
+
         # Flush and shut down the OTel tracer provider cleanly on exit.
         try:
             from opentelemetry import trace
@@ -190,10 +194,13 @@ async def chat(request: Request) -> JSONResponse:
     }
 
     try:
-        async with httpx.AsyncClient() as client:
-            llm_response = await client.post(
-                llm_api_url, headers=headers, json=payload, timeout=30.0
-            )
+        # Shared pooled client — connections are reused across requests
+        # instead of a fresh TCP+TLS handshake per /chat call.
+        from humane_proxy.http_client import get_async_client
+        client = get_async_client()
+        llm_response = await client.post(
+            llm_api_url, headers=headers, json=payload, timeout=30.0
+        )
         try:
             body = llm_response.json()
         except (ValueError, TypeError):
