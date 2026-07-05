@@ -136,6 +136,27 @@ _INTENT_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     ),
 ]
 
+def _distinct_signal_clusters(spans: list[tuple[int, int]]) -> int:
+    """Count the number of non-overlapping groups among trigger match spans.
+
+    Overlapping spans (a keyword and an intent pattern firing on the same
+    phrase) collapse into one cluster; disjoint spans (separate harmful
+    expressions in different parts of the message) count individually.
+    """
+    if not spans:
+        return 0
+    ordered = sorted(spans)
+    clusters = 1
+    current_end = ordered[0][1]
+    for start, end in ordered[1:]:
+        if start >= current_end:
+            clusters += 1
+            current_end = end
+        else:
+            current_end = max(current_end, end)
+    return clusters
+
+
 def classify(text: str) -> tuple[str, float, list[str]]:
     """Run heuristic checks on *text* and return ``(category, score, triggers)``.
 
@@ -164,32 +185,32 @@ def classify(text: str) -> tuple[str, float, list[str]]:
 
     score: float = 0.0
     category: str = "safe"
-    seen: set[str] = set()       # O(1) dedup
-    triggers: list[str] = []     # ordered output
-    trigger_count: int = 0       # count of hard triggers for reducer gating
+    seen: set[str] = set()                    # O(1) dedup
+    triggers: list[str] = []                  # ordered output
+    spans: list[tuple[int, int]] = []         # match positions for reducer gating
 
     # --- Self-harm keyword scan ---
     for keyword, pattern in _SELF_HARM_PATTERNS:
-        if pattern.search(text):
+        if match := pattern.search(text):
             tag = f"self_harm_keyword:{keyword}"
             if tag not in seen:
                 seen.add(tag)
                 triggers.append(tag)
+                spans.append(match.span())
                 score += _SELF_HARM_KEYWORD_SCORE
-                trigger_count += 1
                 category = "self_harm"
             if score >= 1.0:
                 break
 
     # --- Criminal keyword scan ---
     for keyword, pattern in _CRIMINAL_PATTERNS:
-        if pattern.search(text):
+        if match := pattern.search(text):
             tag = f"criminal_keyword:{keyword}"
             if tag not in seen:
                 seen.add(tag)
                 triggers.append(tag)
+                spans.append(match.span())
                 score += _CRIMINAL_KEYWORD_SCORE
-                trigger_count += 1
                 if category != "self_harm":
                     category = "criminal_intent"
             if score >= 1.0:
@@ -197,13 +218,13 @@ def classify(text: str) -> tuple[str, float, list[str]]:
 
     # --- Intent pattern scan ---
     for name, pat_category, pattern in _INTENT_PATTERNS:
-        if pattern.search(text):
+        if match := pattern.search(text):
             tag = f"intent_pattern:{name}"
             if tag not in seen:
                 seen.add(tag)
                 triggers.append(tag)
+                spans.append(match.span())
                 score += _INTENT_PATTERN_SCORE
-                trigger_count += 1
                 # Self-harm patterns upgrade the category.
                 if pat_category == "self_harm":
                     category = "self_harm"
@@ -213,9 +234,14 @@ def classify(text: str) -> tuple[str, float, list[str]]:
                 break
 
     # --- Context reducer check ---
-    # Only activate when there's a single hard trigger — multiple triggers
-    # indicate genuine concern that shouldn't be neutralized by stray context.
-    if score > 0.0 and trigger_count == 1:
+    # Reducers activate only when every trigger stems from ONE expression in
+    # the text (their match spans all overlap).  A keyword and an intent
+    # pattern routinely co-fire on the same phrase ("how to make a bomb in
+    # minecraft" trips both), and counting that as two independent signals
+    # used to lock reducers out of exactly the false positives they exist
+    # for.  Two or more *separate* harmful expressions still disable
+    # reduction — that is genuine concern, not stray context.
+    if score > 0.0 and _distinct_signal_clusters(spans) == 1:
         for reducer_pattern in _CONTEXT_REDUCER_PATTERNS:
             if reducer_pattern.search(text):
                 score *= 0.1

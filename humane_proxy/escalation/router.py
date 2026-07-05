@@ -161,9 +161,12 @@ def escalate(
 
     Flow
     ----
-    1. Check the per-session rate limit.
-    2. If allowed → log to SQLite, emit a CRITICAL log, fire webhooks.
-    3. Return a result dict indicating the outcome.
+    1. Persist the event to the audit log — always.  The audit trail must
+       be complete; only *alerting* is rate limited.
+    2. Check the per-session alert rate limit.
+    3. If within quota → emit a CRITICAL log and fire webhooks.
+    4. Return a result dict indicating the outcome (``alerted`` says
+       whether operator notifications went out).
 
     Parameters
     ----------
@@ -185,24 +188,19 @@ def escalate(
     Returns
     -------
     dict
-        ``{"escalated": True/False, "reason": "...", "category": "..."}``
+        ``{"escalated": bool, "alerted": bool, "reason": "...",
+           "category": "..."}`` — ``escalated`` means the event was
+        recorded; ``alerted`` means operator notifications were sent.
     """
     triggers = triggers or []
 
-    # --- Rate-limit gate ---
-    if not check_rate_limit(session_id):
-        logger.warning(
-            "[RATE-LIMITED] session=%s  category=%s  risk_score=%.2f — suppressed (quota exhausted)",
-            session_id, category, risk_score,
-        )
-        return {
-            "escalated": False,
-            "reason": "rate_limited",
-            "session_id": session_id,
-            "category": category,
-        }
+    # --- Alert rate-limit check (before logging so the quota is counted
+    # against events already persisted in the window) ---
+    alerts_allowed = check_rate_limit(session_id)
 
-    # --- Persist (with failure protection) ---
+    # --- Persist — always, with failure protection.  Rate limiting only
+    # applies to operator alerts; suppressing audit records would blind
+    # exactly the sessions escalating hard enough to hit the limit. ---
     try:
         log_escalation(
             session_id, risk_score, triggers, category,
@@ -214,11 +212,29 @@ def escalate(
         logger.exception("Failed to write escalation to DB for session=%s", session_id)
         return {
             "escalated": True,
+            "alerted": False,
             "reason": "logged_with_db_error",
             "session_id": session_id,
             "category": category,
             "risk_score": risk_score,
             "triggers": list(triggers),
+        }
+
+    if not alerts_allowed:
+        logger.warning(
+            "[RATE-LIMITED] session=%s  category=%s  risk_score=%.2f — "
+            "event logged, alerts suppressed (quota exhausted)",
+            session_id, category, risk_score,
+        )
+        return {
+            "escalated": True,
+            "alerted": False,
+            "reason": "logged_alerts_rate_limited",
+            "session_id": session_id,
+            "category": category,
+            "risk_score": risk_score,
+            "triggers": list(triggers),
+            "stage_reached": stage_reached,
         }
 
     # --- Highly-visible structured log ---
@@ -242,6 +258,7 @@ def escalate(
 
     return {
         "escalated": True,
+        "alerted": True,
         "reason": "logged",
         "session_id": session_id,
         "category": category,

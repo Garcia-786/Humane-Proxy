@@ -55,7 +55,8 @@ heuristics:
   intent_pattern_score: 0.7
 
   # Context-reducing phrases that lower false positives.
-  # When these appear alongside a single trigger, the score is reduced.
+  # Applied when all triggers stem from a single expression in the message
+  # (overlapping matches); separate harmful expressions disable reduction.
   context_reducers:
     - "laughing"
     - "of laughter"
@@ -226,6 +227,9 @@ admin:
 # ---------------------------------------------------------------------------
 
 escalation:
+  # Per-session ALERT rate limiting. Every escalation is always written to
+  # the audit log; this quota only caps operator notifications (webhooks,
+  # email, CRITICAL log banner) per session per window.
   rate_limit_max: 3
   rate_limit_window_hours: 1
 

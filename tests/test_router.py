@@ -30,13 +30,34 @@ class TestEscalation:
 
 
 class TestRateLimiting:
-    def test_rate_limit_blocks_after_max(self):
+    def test_rate_limit_suppresses_alerts_after_max(self):
         sid = "ratelimit-sess"
         for _ in range(3):
-            escalate(sid, 0.9, ["t"], "self_harm")
+            result = escalate(sid, 0.9, ["t"], "self_harm")
+            assert result["alerted"] is True
         result = escalate(sid, 0.9, ["t"], "self_harm")
-        assert result["escalated"] is False
-        assert result["reason"] == "rate_limited"
+        # The event is still recorded — only alerting is rate limited.
+        assert result["escalated"] is True
+        assert result["alerted"] is False
+        assert result["reason"] == "logged_alerts_rate_limited"
+
+    def test_rate_limited_events_still_reach_audit_log(self):
+        from humane_proxy.storage.factory import get_store
+
+        sid = "ratelimit-audit-sess"
+        for _ in range(5):
+            escalate(sid, 0.9, ["t"], "self_harm")
+        # All 5 events must be persisted even though only 3 alerted.
+        assert get_store().count(session_id=sid) == 5
+
+    def test_no_webhooks_fired_when_rate_limited(self):
+        sid = "ratelimit-webhook-sess"
+        for _ in range(3):
+            escalate(sid, 0.9, ["t"], "self_harm")
+
+        with patch("humane_proxy.escalation.router._fire_webhooks") as mock_fire:
+            escalate(sid, 0.9, ["t"], "self_harm")
+            mock_fire.assert_not_called()
 
 
 class TestDbFailure:
