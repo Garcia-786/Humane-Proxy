@@ -192,13 +192,42 @@ class TestPipelineFullAsync:
         assert "stage3_error" in result.classification.triggers
 
     @pytest.mark.asyncio
-    async def test_early_exit_clear_safe(self):
+    async def test_safe_message_flows_to_stage3_by_default(self):
+        # Fail-safe default (stage3_on_safe=True): Stage 3 is the safety net
+        # and evaluates messages Stages 1-2 marked safe, because embeddings
+        # score much criminal content near zero.
         config = _base_config()
         config["pipeline"]["enabled_stages"] = [1, 2, 3]
 
         pipeline = SafetyPipeline(config)
 
-        # Stage 2 IS called (by design — it catches what heuristics miss).
+        mock_s2 = MagicMock()
+        mock_s2.classify.return_value = ClassificationResult(
+            category="safe", score=0.0, triggers=[], stage=2,
+        )
+        pipeline._stage2 = mock_s2
+
+        mock_s3 = AsyncMock()
+        mock_s3.classify.return_value = ClassificationResult(
+            category="safe", score=0.0, triggers=[], stage=3,
+        )
+        pipeline._stage3 = mock_s3
+
+        result = await pipeline.classify("What time is it?", "test-early")
+        assert result.classification.category == "safe"
+        mock_s2.classify.assert_called_once()
+        # Stage 3 IS called — the safety net sees non-flagged messages.
+        mock_s3.classify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stage3_on_safe_false_restores_early_exit(self):
+        # Cost-saving mode: safe messages below ceiling skip Stage 3.
+        config = _base_config()
+        config["pipeline"]["enabled_stages"] = [1, 2, 3]
+        config["pipeline"]["stage3_on_safe"] = False
+
+        pipeline = SafetyPipeline(config)
+
         mock_s2 = MagicMock()
         mock_s2.classify.return_value = ClassificationResult(
             category="safe", score=0.0, triggers=[], stage=2,
@@ -210,9 +239,7 @@ class TestPipelineFullAsync:
 
         result = await pipeline.classify("What time is it?", "test-early")
         assert result.classification.category == "safe"
-        # Stage 2 is called (all messages flow through when enabled).
         mock_s2.classify.assert_called_once()
-        # Stage 3 is NOT called (Stage 2 returned safe below ceiling).
         mock_s3.classify.assert_not_called()
 
     @pytest.mark.asyncio

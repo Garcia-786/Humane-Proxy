@@ -77,11 +77,17 @@ class SafetyPipeline:
         self.stage2_ceiling: float = self._as_float(
             pipeline_cfg.get("stage2_ceiling", 0.4), 0.4, "pipeline.stage2_ceiling"
         )
+        # Fail-safe default: when Stage 3 is enabled, it evaluates messages
+        # Stages 1-2 marked safe (full safety net). Set false to restore the
+        # cost-saving early exit for paid Stage-3 providers.
+        self.stage3_on_safe: bool = bool(
+            pipeline_cfg.get("stage3_on_safe", True)
+        )
         self.spike_boost: float = self._as_float(
             safety_cfg.get("spike_boost", 0.25), 0.25, "safety.spike_boost"
         )
         self.risk_threshold: float = self._as_float(
-            safety_cfg.get("risk_threshold", 0.7), 0.7, "safety.risk_threshold"
+            safety_cfg.get("risk_threshold", 0.5), 0.5, "safety.risk_threshold"
         )
         self.store_message_text: bool = bool(
             config.get("privacy", {}).get("store_message_text", False)
@@ -258,6 +264,8 @@ class SafetyPipeline:
         ):
             return self._finalize(result, session_id, text)
 
+        stage3_enabled = 3 in self.enabled_stages and self._stage3 is not None
+
         # Stage 2 — Embeddings (if enabled).
         if stage2_enabled:
             s2 = self._stage2.classify(text)
@@ -266,11 +274,21 @@ class SafetyPipeline:
             # Early exit after Stage 2.
             if result.category == "self_harm":
                 return self._finalize(result, session_id, text)
-            if result.score <= self.stage2_ceiling and result.category == "safe":
+            # Short-circuit "safe" only when no Stage-3 safety net remains.
+            # Embeddings score much criminal content near zero (it is
+            # semantically far from the anchors), so skipping Stage 3 here
+            # would let exactly the prompts Stage 2 is weakest on pass
+            # unchecked. When Stage 3 is enabled, safe messages flow to it
+            # unless the operator opts into the cost-saving early exit.
+            if (
+                result.score <= self.stage2_ceiling
+                and result.category == "safe"
+                and not (stage3_enabled and self.stage3_on_safe)
+            ):
                 return self._finalize(result, session_id, text)
 
         # Stage 3 — Reasoning LLM (if enabled).
-        if 3 in self.enabled_stages and self._stage3 is not None:
+        if stage3_enabled:
             try:
                 s3 = await self._stage3.classify(text, result)
                 result = self._combine(result, s3)

@@ -338,7 +338,11 @@ def session(session_id: str) -> None:
                    "datasets; large runs list failures only.")
 @click.option("--json-out", type=click.Path(), default=None,
               help="Write metrics and per-case results to a JSON file.")
-def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str | None) -> None:
+@click.option("--delay", type=float, default=0.0,
+              help="Seconds to wait between messages. Use to stay under a "
+                   "Stage-3 provider's rate limit (e.g. free tiers).")
+def benchmark(dataset: str, ci: bool, stages: str, verbose: bool,
+              json_out: str | None, delay: float) -> None:
     """Run an evaluation dataset through the safety pipeline and report results.
 
     The dataset must be a JSON file containing an array of objects, each with
@@ -389,7 +393,10 @@ def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str 
     results = []
 
     async def _run_all():
+        import asyncio as _asyncio
         for i, case in enumerate(cases):
+            if delay > 0 and i > 0:
+                await _asyncio.sleep(delay)
             msg = case["message"]
             expected = case["expected"]
             t0 = time.perf_counter()
@@ -414,7 +421,14 @@ def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str 
                 "latency_ms": elapsed_ms,
             })
 
-    asyncio.run(_run_all())
+    from humane_proxy._profiling import ResourceSampler, capture_environment
+
+    environment = capture_environment()
+    wall_t0 = time.perf_counter()
+    with ResourceSampler() as sampler:
+        asyncio.run(_run_all())
+    wall_seconds = time.perf_counter() - wall_t0
+    resource_usage = sampler.stats()
 
     # --- Compute metrics ---
     categories = ["safe", "self_harm", "criminal_intent"]
@@ -422,12 +436,30 @@ def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str 
     passed_count = sum(1 for r in results if r["passed"])
     failed_count = total - passed_count
 
-    latencies = sorted(r["latency_ms"] for r in results)
-    avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
-    min_latency = latencies[0] if latencies else 0.0
-    max_latency = latencies[-1] if latencies else 0.0
-    p50_latency = latencies[len(latencies) // 2] if latencies else 0.0
-    p95_latency = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else 0.0
+    def _percentiles(values: list[float]) -> dict:
+        s = sorted(values)
+        n = len(s)
+        if n == 0:
+            return {"avg": 0.0, "p50": 0.0, "p95": 0.0, "min": 0.0, "max": 0.0}
+        return {
+            "avg": sum(s) / n,
+            "p50": s[n // 2],
+            "p95": s[min(n - 1, int(n * 0.95))],
+            "min": s[0],
+            "max": s[-1],
+        }
+
+    lat = _percentiles([r["latency_ms"] for r in results])
+    avg_latency, min_latency, max_latency = lat["avg"], lat["min"], lat["max"]
+    p50_latency, p95_latency = lat["p50"], lat["p95"]
+    throughput = total / wall_seconds if wall_seconds > 0 else 0.0
+
+    # Latency grouped by the stage that produced each verdict, so the cost
+    # of stage-1-only vs escalating to stage 2/3 is visible separately.
+    latency_by_stage = {
+        str(s): _percentiles([r["latency_ms"] for r in results if r["stage"] == s])
+        for s in sorted({r["stage"] for r in results})
+    }
 
     # Binary safe/unsafe metrics. Category confusion between the two harm
     # classes still counts as detection here; a safety proxy's first job
@@ -555,6 +587,21 @@ def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str 
             f"\nLatency — avg: {avg_latency:.1f}ms  p50: {p50_latency:.1f}ms  "
             f"p95: {p95_latency:.1f}ms  min: {min_latency:.1f}ms  max: {max_latency:.1f}ms"
         )
+        summary_text.append(
+            f"\nThroughput: {throughput:.1f} msg/s over {wall_seconds:.2f}s wall"
+        )
+        if resource_usage is not None:
+            summary_text.append(
+                f"\nResources — CPU avg {resource_usage['cpu_percent_mean']}% "
+                f"(peak {resource_usage['cpu_percent_peak']}%, {resource_usage['cpu_count']} cores)  "
+                f"peak RSS {resource_usage['peak_rss_mb']} MB"
+            )
+        summary_text.append(
+            f"\nMachine — {environment['processor']}  "
+            f"{environment['cpu_count']} cores  "
+            f"{environment.get('ram_total_gb', '?')} GB RAM  "
+            f"Python {environment['python']}"
+        )
 
         panel_style = "green" if failed_count == 0 else "red"
         console.print(Panel(summary_text, title="Benchmark Summary", border_style=panel_style))
@@ -594,6 +641,17 @@ def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str 
             f"  Latency — avg: {avg_latency:.1f}ms  p50: {p50_latency:.1f}ms  "
             f"p95: {p95_latency:.1f}ms  min: {min_latency:.1f}ms  max: {max_latency:.1f}ms"
         )
+        click.echo(f"  Throughput: {throughput:.1f} msg/s over {wall_seconds:.2f}s wall")
+        if resource_usage is not None:
+            click.echo(
+                f"  Resources — CPU avg {resource_usage['cpu_percent_mean']}% "
+                f"(peak {resource_usage['cpu_percent_peak']}%, {resource_usage['cpu_count']} cores)  "
+                f"peak RSS {resource_usage['peak_rss_mb']} MB"
+            )
+        click.echo(
+            f"  Machine — {environment['processor']}  {environment['cpu_count']} cores  "
+            f"{environment.get('ram_total_gb', '?')} GB RAM  Python {environment['python']}"
+        )
 
         for cat in categories:
             m = cat_metrics[cat]
@@ -613,10 +671,15 @@ def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str 
             "harm_recall": harm_recall,
             "false_positive_rate": false_positive_rate,
             "stage_counts": {str(k): v for k, v in sorted(stage_counts.items())},
-            "latency_ms": {
-                "avg": avg_latency, "p50": p50_latency, "p95": p95_latency,
-                "min": min_latency, "max": max_latency,
+            "wall_seconds": round(wall_seconds, 3),
+            "throughput_msgs_per_sec": round(throughput, 1),
+            "latency_ms": {k: round(v, 3) for k, v in lat.items()},
+            "latency_by_stage_ms": {
+                s: {k: round(v, 3) for k, v in p.items()}
+                for s, p in latency_by_stage.items()
             },
+            "environment": environment,
+            "resource_usage": resource_usage,
             "categories": cat_metrics,
             "results": results,
         }

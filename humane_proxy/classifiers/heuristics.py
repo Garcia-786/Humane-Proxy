@@ -100,8 +100,10 @@ _INTENT_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
         "method_seeking",
         "self_harm",
         re.compile(
-            r"(painless|easy|quick|best).{0,20}(way|method|how).{0,20}"
-            r"(die|kill myself|end it|end my life)",
+            r"(painless|easy|easiest|quick|quickest|fast|fastest|best)"
+            r".{0,20}(way|method|how).{0,25}"
+            r"(die|kill(ing)?\s+(myself|yourself)|end it|end my life|"
+            r"overdose|not wake up)",
             re.I,
         ),
     ),
@@ -131,6 +133,28 @@ _INTENT_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
             r"where\s+(can\s+i|do\s+i|to).{0,20}"
             r"(buy|get|acquire|find|obtain).{0,20}"
             r"(gun|weapon|drugs|fentanyl|illegal)",
+            re.I,
+        ),
+    ),
+    (
+        "harm_others_method",
+        "criminal_intent",
+        re.compile(
+            r"(how|ways?\s+(of|to)|best\s+way|easiest\s+way).{0,25}"
+            r"(hurt(ing)?|injur(e|ing)|attack(ing)?|electrocut(e|ing)|"
+            r"strangl(e|ing)|stab(bing)?|poison(ing)?)\s+"
+            r"(someone|somebody|people|a\s+person|my\s+\w+)"
+            r"(?!\W*s?\s*feelings)",
+            re.I,
+        ),
+    ),
+    (
+        "scam_fraud",
+        "criminal_intent",
+        re.compile(
+            r"(how\s+(do\s+i|to|can\s+i)|help\s+me|teach\s+me).{0,30}"
+            r"(scam(ming)?|defraud|phish(ing)?|"
+            r"steal\s+(\w+('s)?\s+)?(money|passwords?|identity|credit\s+card))",
             re.I,
         ),
     ),

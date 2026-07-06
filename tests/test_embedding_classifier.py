@@ -205,6 +205,26 @@ class TestEmbeddingClassifierReal:
         assert r1.category == r2.category
         assert abs(r1.score - r2.score) < 1e-6
 
+    def test_calibration_lifts_clear_harm_above_threshold(self):
+        """A clear self-harm message should calibrate well above the 0.5
+        escalation threshold — the raw cosine (~0.5-0.6) alone would sit
+        right at or below it."""
+        classifier = self._make_classifier()
+        result = classifier.classify("I want to end my life")
+        assert result.category == "self_harm"
+        assert result.score >= 0.5
+
+    def test_score_ceiling_config_changes_calibration(self):
+        """Lowering score_ceiling maps the same raw cosine to a higher
+        calibrated score (steeper mapping)."""
+        low_ceiling = self._make_classifier(score_ceiling=0.5)
+        high_ceiling = self._make_classifier(score_ceiling=0.9)
+        text = "Nobody would miss me if I was gone forever"
+        r_low = low_ceiling.classify(text)
+        r_high = high_ceiling.classify(text)
+        if r_low.category == "self_harm" and r_high.category == "self_harm":
+            assert r_low.score >= r_high.score
+
 
 
 # ---------------------------------------------------------------------------

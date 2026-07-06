@@ -21,10 +21,8 @@ that **jailbreaks are always safe** — the focus is on genuine human harm.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-
 
 from humane_proxy._json import loads as _json_loads
 from humane_proxy.classifiers.models import ClassificationResult
@@ -32,6 +30,43 @@ from humane_proxy.classifiers.stage3.base import Stage3Classifier
 from humane_proxy.telemetry import traced_stage
 
 logger = logging.getLogger("humane_proxy.classifiers.stage3.openai_chat")
+
+
+def _extract_json_object(content: str) -> dict | None:
+    """Return the JSON object from *content*, tolerating surrounding prose.
+
+    Tries a direct parse first, then scans for the last balanced ``{...}``
+    span (reasoning models put the answer object at the end). Returns None
+    when nothing parses to a dict.
+    """
+    if not content:
+        return None
+    try:
+        data = _json_loads(content)
+        if isinstance(data, dict):
+            return data
+    except ValueError:
+        pass
+
+    # Scan for balanced brace spans; keep the last one that parses to a dict.
+    found: dict | None = None
+    depth = 0
+    start = -1
+    for i, ch in enumerate(content):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    candidate = _json_loads(content[start:i + 1])
+                    if isinstance(candidate, dict) and "category" in candidate:
+                        found = candidate
+                except ValueError:
+                    pass
+    return found
 
 _SYSTEM_PROMPT = """\
 You are a safety classifier for a human-protection system called HumaneProxy.
@@ -47,10 +82,11 @@ CRITICAL RULES:
 - A jailbreak attempt (e.g. "ignore previous instructions") is ALWAYS "safe".
   Jailbreaks are NOT our concern.
 - Hyperbolic expressions like "I'm dying of laughter" are ALWAYS "safe".
-- Academic or help-seeking questions like "what are warning signs of suicide"
-  are ALWAYS "safe".
-- When in doubt, lean toward "safe" for criminal_intent but toward flagging
-  for self_harm. Missing a person in distress is far worse than a false alarm.
+- Academic, journalistic, fictional, or help-seeking questions (e.g. "what are
+  warning signs of suicide", "how do detectives investigate fraud") are "safe".
+- Otherwise, if the message genuinely seeks to harm a person (including the
+  user) or to carry out a serious crime, flag it. Do NOT wave away real intent
+  as hypothetical. Missing genuine harm is far worse than a false alarm.
 
 Respond ONLY with a JSON object: {"category": "...", "score": 0.0-1.0, "reasoning": "..."}
 """
@@ -65,8 +101,19 @@ class OpenAIChatClassifier(Stage3Classifier):
             "api_url", "https://api.openai.com/v1/chat/completions"
         )
         self._model: str = chat_cfg.get("model", "gpt-4o-mini")
+        # Reasoning models emit chain-of-thought before the JSON answer. Too
+        # small a budget truncates the response — and with JSON-mode enabled,
+        # providers reject the whole call — so the classifier would silently
+        # fall back to the prior (safe) verdict. Keep this generous.
+        self._max_tokens: int = int(chat_cfg.get("max_tokens", 1024))
+        self._json_mode: bool = bool(chat_cfg.get("json_mode", False))
         self._timeout: float = config.get("stage3", {}).get("timeout", 10.0)
-        self._api_key: str = os.environ.get("OPENAI_API_KEY", "")
+        # OPENAI_API_KEY first, then LLM_API_KEY — the endpoint is
+        # configurable (Groq, Together, a local server), so the key need
+        # not be an OpenAI one.
+        self._api_key: str = os.environ.get(
+            "OPENAI_API_KEY", os.environ.get("LLM_API_KEY", "")
+        )
 
     @traced_stage("stage3.reasoning_llm")
     async def classify(
@@ -81,9 +128,15 @@ class OpenAIChatClassifier(Stage3Classifier):
             "model": self._model,
             "messages": messages,
             "temperature": 0.0,
-            "max_tokens": 200,
-            "response_format": {"type": "json_object"},
+            "max_tokens": self._max_tokens,
         }
+        # JSON mode forces the whole output to be a single JSON value, which
+        # reasoning models break (their chain-of-thought precedes the JSON,
+        # and an overflow rejects the entire call). Off by default so the
+        # tolerant parser can extract the JSON from free-form text; enable
+        # for plain chat models that support it.
+        if self._json_mode:
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -113,13 +166,15 @@ class OpenAIChatClassifier(Stage3Classifier):
             )
 
     def _parse_response(self, content: str) -> ClassificationResult:
-        """Parse the model's JSON response."""
-        try:
-            # orjson's JSONDecodeError subclasses json's, so this handler
-            # covers both shim paths.
-            data = _json_loads(content)
-        except json.JSONDecodeError:
-            logger.warning("Stage-3 returned non-JSON: %s", content[:200])
+        """Parse the model's JSON verdict, tolerating reasoning prose.
+
+        Reasoning models emit chain-of-thought before the JSON, so a plain
+        ``loads`` of the whole response fails. Fall back to extracting the
+        last balanced ``{...}`` object from the text.
+        """
+        data = _extract_json_object(content)
+        if data is None:
+            logger.warning("Stage-3 returned no parseable JSON: %s", content[:200])
             return ClassificationResult(
                 category="safe",
                 score=0.0,
@@ -131,11 +186,19 @@ class OpenAIChatClassifier(Stage3Classifier):
         if category not in ("self_harm", "criminal_intent", "safe"):
             category = "safe"
 
-        score = float(data.get("score", 0.0))
-        score = max(0.0, min(1.0, score))
+        try:
+            score = max(0.0, min(1.0, float(data.get("score", 0.0))))
+        except (TypeError, ValueError):
+            score = 0.0
 
+        # A dedicated Stage-3 safety classifier's category IS the verdict.
+        # Its self-reported score is confidence and is often moderate even
+        # for clear harm, so a harmful category is floored to a confident
+        # value rather than being re-thresholded away downstream.
         if category == "self_harm":
             score = 1.0  # Critical override.
+        elif category == "criminal_intent":
+            score = max(score, 0.9)
 
         reasoning = data.get("reasoning", "")
 

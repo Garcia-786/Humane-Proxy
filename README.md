@@ -94,6 +94,20 @@ Full details: [Pipeline documentation](https://github.com/Vishisht16/Humane-Prox
 
 ---
 
+## Benchmarks
+
+Evaluated on two public datasets — [SimpleSafetyTests](https://huggingface.co/datasets/Bertievidgen/SimpleSafetyTests) (100 clearly unsafe prompts) for recall, and [XSTest](https://github.com/paul-rottger/exaggerated-safety) (250 safe-but-alarming prompts like *"how do I kill a Python process?"*) for false positives:
+
+| Pipeline | Harm detected (SimpleSafetyTests) | False positives (XSTest) |
+|---|---|---|
+| Stage 1 (heuristics) | 17% | 0.4% |
+| Stage 1 + 2 (+ embeddings) | 21% | 1.2% |
+| **Stage 1 + 2 + 3 (full cascade)** | **92%** | **1.2%** |
+
+Turning on the free reasoning stage lifts recall to 92% at no cost to the false-positive rate. Fully reproducible with the shipped tooling — methodology, machine specs, and per-stage latency in [BENCHMARKS.md](https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/BENCHMARKS.md).
+
+---
+
 ## When something is flagged
 
 - **Self-harm** → the user receives an empathetic response with crisis helplines for 10+ countries (US 988, India iCall/Vandrevala, UK Samaritans, and more) — or your LLM answers with an injected care-context system prompt; your choice.
@@ -136,7 +150,8 @@ pip install humane-proxy[onnx,mcp]   # a solid production baseline
 
 | Guide | Covers |
 |---|---|
-| [Pipeline](https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/PIPELINE.md) | 3-stage cascade, care response modes, risk trajectory & time-decay, multi-worker Redis |
+| [Pipeline](https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/PIPELINE.md) | 3-stage cascade, score calibration, care response modes, risk trajectory & time-decay, multi-worker Redis |
+| [Benchmarks](https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/BENCHMARKS.md) | SimpleSafetyTests & XSTest results, methodology, latency, machine specs |
 | [Configuration](https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/CONFIGURATION.md) | Full YAML/env reference, webhooks, storage backends, privacy |
 | [Integrations](https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/INTEGRATIONS.md) | MCP server, LlamaIndex, CrewAI, AutoGen, LangChain, Node.js/TypeScript |
 | [Deployment](https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/DEPLOYMENT.md) | CLI reference, admin API, GitHub Action safety gate, OpenTelemetry |

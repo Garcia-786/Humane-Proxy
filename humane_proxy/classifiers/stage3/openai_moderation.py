@@ -40,6 +40,9 @@ class OpenAIModerationClassifier(Stage3Classifier):
         self._api_url: str = mod_cfg.get(
             "api_url", "https://api.openai.com/v1/moderations"
         )
+        # omni-moderation-* emits the illicit / illicit-violent categories
+        # that text-moderation-* lacks — needed for criminal-intent coverage.
+        self._model: str = mod_cfg.get("model", "omni-moderation-latest")
         self._timeout: float = config.get("stage3", {}).get("timeout", 10.0)
         self._api_key: str = os.environ.get("OPENAI_API_KEY", "")
 
@@ -52,7 +55,7 @@ class OpenAIModerationClassifier(Stage3Classifier):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        payload = {"input": text}
+        payload = {"model": self._model, "input": text}
 
         try:
             from humane_proxy.http_client import get_async_client
@@ -80,9 +83,15 @@ class OpenAIModerationClassifier(Stage3Classifier):
         """Parse the moderation API response.
 
         Maps OpenAI categories to ours:
-        - ``self-harm``, ``self-harm/intent``, ``self-harm/instructions`` → self_harm
-        - ``violence``, ``violence/graphic`` → criminal_intent
-        - ``sexual/minors`` → criminal_intent
+        - ``self-harm``, ``self-harm/intent``, ``self-harm/instructions`` -> self_harm
+        - ``violence``, ``violence/graphic`` -> criminal_intent
+        - ``illicit``, ``illicit/violent`` -> criminal_intent
+        - ``sexual/minors`` -> criminal_intent
+
+        The ``illicit`` categories (weapons, drugs, fraud, other crimes) are
+        emitted by the ``omni-moderation-*`` models and are central to
+        criminal-intent coverage — without them, prompts like drug synthesis
+        or fraud schemes would be dropped to safe.
         """
         results = body.get("results", [{}])[0]
         categories: dict = results.get("categories", {})
@@ -98,26 +107,34 @@ class OpenAIModerationClassifier(Stage3Classifier):
                 reasoning="OpenAI Moderation: not flagged",
             )
 
-        # Determine our category from OpenAI's categories.
+        # A moderation category boolean is OpenAI's own calibrated decision
+        # that the content violates policy. Its category_scores are raw and
+        # often sit below 0.5 even when flagged, so passing them through and
+        # re-thresholding would discard OpenAI's judgement and let flagged
+        # harm pass. Treat a mapped flag as a confident detection instead.
+        _FLAG_SCORE = 0.9
+
         detected_triggers: list[str] = []
         category = "safe"
-        max_score = 0.0
+        max_raw = 0.0
 
         # Self-harm checks (highest priority).
         for key in ("self-harm", "self-harm/intent", "self-harm/instructions"):
             if categories.get(key, False):
                 category = "self_harm"
-                score_val = scores.get(key, 0.9)
-                max_score = max(max_score, score_val)
+                max_raw = max(max_raw, scores.get(key, 0.0))
                 detected_triggers.append(f"openai_mod:{key}")
 
         # Violence / criminal checks.
         if category == "safe":
-            for key in ("violence", "violence/graphic", "sexual/minors"):
+            for key in (
+                "violence", "violence/graphic",
+                "illicit", "illicit/violent",
+                "sexual/minors",
+            ):
                 if categories.get(key, False):
                     category = "criminal_intent"
-                    score_val = scores.get(key, 0.8)
-                    max_score = max(max_score, score_val)
+                    max_raw = max(max_raw, scores.get(key, 0.0))
                     detected_triggers.append(f"openai_mod:{key}")
 
         # Other flags (harassment, etc.) — log but treat as safe for now.
@@ -126,14 +143,30 @@ class OpenAIModerationClassifier(Stage3Classifier):
                 if val:
                     detected_triggers.append(f"openai_mod:{key}")
             # Keep as safe — other moderation flags aren't our domain.
+            return ClassificationResult(
+                category="safe",
+                score=0.0,
+                triggers=detected_triggers or ["openai_moderation:flagged"],
+                stage=3,
+                reasoning=(
+                    "OpenAI Moderation flagged non-mapped categories: "
+                    f"{', '.join(detected_triggers)}"
+                ),
+            )
 
         if category == "self_harm":
-            max_score = 1.0  # Critical override.
+            final_score = 1.0  # Critical override.
+        else:
+            # Confident detection; keep the raw score if it is even higher.
+            final_score = max(_FLAG_SCORE, max_raw)
 
         return ClassificationResult(
             category=category,
-            score=min(1.0, max_score),
+            score=min(1.0, final_score),
             triggers=detected_triggers or ["openai_moderation:flagged"],
             stage=3,
-            reasoning=f"OpenAI Moderation flagged: {', '.join(detected_triggers)}",
+            reasoning=(
+                f"OpenAI Moderation flagged: {', '.join(detected_triggers)} "
+                f"(top raw score {max_raw:.2f})"
+            ),
         )

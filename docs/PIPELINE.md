@@ -104,11 +104,22 @@ pipeline:
 stage2:
   model: "all-MiniLM-L6-v2"   # ~80 MB, downloads once to HuggingFace cache
   safe_threshold: 0.35         # cosine similarity below this -> safe
+  score_ceiling: 0.65          # cosine at/above this calibrates to 1.0
   backend: "auto"              # "auto" | "onnx" | "sentence-transformers"
 ```
 
 Both backends produce numerically equivalent embeddings; `"auto"`
 (the default) prefers ONNX Runtime when installed.
+
+### Score calibration
+
+Raw cosine similarity for clearly harmful text tops out around 0.55-0.65
+with MiniLM-class models, but the pipeline's escalation thresholds are on
+a `[0, 1]` scale (shared with Stage-1 keyword scores). Stage 2 therefore
+**calibrates**: a raw cosine in `[safe_threshold, score_ceiling]` maps
+linearly onto `[0, 1]`, so a genuinely harmful message clears the same
+threshold a keyword match would. Below `safe_threshold` stays exactly 0.
+Ambiguity dampening (below) still keys off the raw cosine scale.
 
 > **Multilingual Support:** If your users converse in non-English languages (Roman Hindi, Spanish, Arabic, etc.), change the `model` in your configuration to `"paraphrase-multilingual-MiniLM-L12-v2"`. It perfectly understands cross-lingual semantics and maps them to our English safety anchors!
 
@@ -155,6 +166,7 @@ stage3:
 
   openai_moderation:
     api_url: "https://api.openai.com/v1/moderations"
+    model: "omni-moderation-latest"   # emits illicit categories
 
   llamaguard:
     api_url: "https://api.groq.com/openai/v1/chat/completions"
@@ -163,9 +175,45 @@ stage3:
   openai_chat:
     api_url: "https://api.openai.com/v1/chat/completions"
     model: "gpt-4o-mini"
+    max_tokens: 1024      # reasoning models need room before the JSON verdict
+    json_mode: false      # reasoning models break strict JSON mode
 ```
 
 If no API key is found and `provider` is `"auto"`, HumaneProxy prints a clear startup warning and runs with Stages 1+2 only.
+
+### Provider notes
+
+- **`openai_moderation`** (the free default when `OPENAI_API_KEY` is set)
+  uses `omni-moderation-latest`, whose `illicit` / `illicit/violent`
+  categories are mapped to `criminal_intent`. A moderation *flag* is
+  treated as a confident detection — its raw category score (often below
+  0.5 even when flagged) is not passed through to be re-thresholded away.
+- **`openai_chat`** works with any OpenAI-compatible endpoint (OpenAI,
+  Groq, Together, or a local server); the key comes from `OPENAI_API_KEY`,
+  falling back to `LLM_API_KEY`. It is reasoning-model-ready: JSON mode is
+  off by default (reasoning models emit chain-of-thought before the JSON,
+  which strict JSON mode rejects) and a tolerant parser extracts the
+  verdict from free-form text. Point it at a hosted safety model — e.g.
+  Groq's `openai/gpt-oss-safeguard-20b` — for strong recall without
+  running your own GPU.
+- A Stage-3 harmful classification is authoritative: its category is the
+  verdict, so it is floored to a confident score rather than being gated
+  out by the escalation threshold.
+
+### When Stage 3 runs (`stage3_on_safe`)
+
+By default (`pipeline.stage3_on_safe: true`), when Stage 3 is enabled it
+evaluates every message Stages 1-2 did **not** already flag — embeddings
+score much criminal content near zero, so the reasoning stage is the
+safety net that catches it. This maximizes recall (see
+[BENCHMARKS.md](BENCHMARKS.md)) but means most traffic reaches the LLM.
+Set `stage3_on_safe: false` to restore the cost-saving early exit, where
+Stage 3 only sees messages Stage 2 left ambiguous.
+
+> **Cost note:** the free default provider (OpenAI Moderation) makes
+> `stage3_on_safe: true` free; with a paid chat model, evaluating every
+> safe message has a per-message cost. Choose the gating that fits your
+> budget and latency budget.
 
 ---
 

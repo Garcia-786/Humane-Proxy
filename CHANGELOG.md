@@ -6,6 +6,90 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+Fail-safe defaults and a working, benchmarked Stage-3 cascade. On
+SimpleSafetyTests the full pipeline now detects **92%** of unsafe prompts
+(Stage 1+2 alone: 21%) while holding a **1.2%** false-positive rate on
+XSTest's safe prompts. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for
+methodology, machine specs, and per-stage latency.
+
+### Added
+
+- **Stage-2 score calibration** (`stage2.score_ceiling`, default `0.65`) —
+  raw cosine similarity in `[safe_threshold, score_ceiling]` is mapped
+  onto `[0, 1]`. Escalation thresholds were tuned to Stage-1 keyword
+  scores; embedding scores for clear harm top out around 0.55-0.65, so
+  without calibration the thresholds were effectively unreachable by
+  Stage 2. Ambiguity dampening still keys off the raw cosine scale.
+- **Stage-3 safety net** (`pipeline.stage3_on_safe`, default `true`) —
+  when Stage 3 is enabled it evaluates messages Stages 1-2 marked safe.
+  Embeddings score much criminal content near zero (it is semantically
+  far from the anchors), so this is where Stage 3 earns its keep. Set
+  `false` to restore the cost-saving early exit for paid providers.
+- **Benchmark profiling** — `hp benchmark` now records the machine
+  (CPU, RAM, OS, Python), per-run CPU/RSS via `psutil`, throughput,
+  and per-stage latency percentiles, all included in `--json-out`. New
+  `--delay` flag spaces calls to stay under a Stage-3 provider's rate
+  limit. New public-dataset fetcher (`evals/fetch.py`) for XSTest and
+  SimpleSafetyTests, plus harm-recall / false-positive-rate / verdict-
+  stage metrics in the report.
+- **Published benchmarks** — [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Changed
+
+- **Fail-safe escalation threshold** — criminal-intent `risk_threshold`
+  lowered `0.7` -> `0.5`. On the calibrated `[0, 1]` scale, 0.7 sat near
+  the embedding ceiling and effectively never triggered; 0.5 roughly
+  doubles criminal recall while holding the XSTest false-positive rate
+  at 1.2%.
+- **Expanded detection coverage** — Stage-2 anchors and Stage-1
+  keywords/intent patterns gained clusters for eating disorders,
+  violence against persons, scams and fraud, child safety, and weapons
+  acquisition (previously scored near zero).
+- **Stage-3 OpenAI Chat provider is now reasoning-model-ready** — the
+  endpoint and key are already configurable (works with Groq, Together,
+  a local server; key falls back from `OPENAI_API_KEY` to `LLM_API_KEY`).
+  Reply budget raised (`stage3.openai_chat.max_tokens`, default `1024`)
+  and JSON mode made optional (`stage3.openai_chat.json_mode`, default
+  `false`) because reasoning models emit chain-of-thought before the
+  JSON verdict — strict JSON mode rejected those replies outright. The
+  parser now tolerantly extracts the JSON object from free-form text.
+  The classifier system prompt no longer instructs the model to lean
+  safe on criminal intent.
+
+### Fixed
+
+- **Stage-3 providers no longer discard their own detections** — OpenAI
+  Moderation and the chat classifier returned a harmful category with a
+  raw confidence score (often below 0.5) that the escalation threshold
+  then dropped back to safe. A dedicated safety classifier's *category*
+  is the verdict, so a flagged harmful category is now floored to a
+  confident score.
+- **OpenAI Moderation criminal-intent coverage** — the `illicit` and
+  `illicit/violent` categories (drugs, weapons, fraud, other crimes) are
+  now mapped to `criminal_intent`; they were previously ignored, sending
+  such prompts to safe. The provider now requests
+  `omni-moderation-latest` (configurable), which emits those categories;
+  the older `text-moderation-*` models do not.
+- **Stage-3 chat reply truncation** — the previous 200-token reply cap
+  truncated reasoning models mid-answer (and, with JSON mode on, caused
+  the provider to reject the whole call), silently failing open to safe.
+- Benchmark output falls back cleanly when stdout has no raw buffer and
+  no longer crashes under test runners (carried over with the profiling
+  work).
+
+### Docs
+
+- README split into focused guides under `docs/` (Pipeline,
+  Configuration, Integrations, Deployment); the README is now a concise
+  landing page. Added a Node.js / TypeScript integration recipe.
+- `SECURITY.md` supported-versions updated (0.6.x supported; 0.5.6-0.5.7
+  critical fixes only; earlier versions are unsupported pre-releases).
+- `humane_proxy.yaml` marked as a copy-me example template.
+
+---
+
 ## [0.6.0] - 2026-07-06
 
 ### Added

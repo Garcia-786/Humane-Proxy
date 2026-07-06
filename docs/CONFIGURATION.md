@@ -22,7 +22,7 @@ example [`humane_proxy.yaml`](../humane_proxy.yaml) from the repository root.
 
 | YAML key | Env var | Default | Description |
 |---|---|---|---|
-| `safety.risk_threshold` | `HUMANE_PROXY_RISK_THRESHOLD` | `0.7` | Score threshold for criminal_intent escalation |
+| `safety.risk_threshold` | `HUMANE_PROXY_RISK_THRESHOLD` | `0.5` | Score threshold for criminal_intent escalation (calibrated `[0,1]` scale) |
 | `safety.categories.self_harm.escalate_threshold` | `HUMANE_PROXY_SELF_HARM_THRESHOLD` | `0.5` | Score threshold for self_harm escalation |
 | `safety.categories.self_harm.response_mode` | — | `"block"` | `"block"` or `"forward"` |
 | `safety.categories.self_harm.region` | — | `""` | Optional ISO country code; surfaces that country's crisis resources first in block mode |
@@ -32,11 +32,16 @@ example [`humane_proxy.yaml`](../humane_proxy.yaml) from the repository root.
 | `pipeline.enabled_stages` | `HUMANE_PROXY_ENABLED_STAGES` | `[1]` | Active stages (e.g. `1,2,3`) |
 | `pipeline.stage1_ceiling` | `HUMANE_PROXY_STAGE1_CEILING` | `0.3` | Early exit after Stage 1 |
 | `pipeline.stage2_ceiling` | `HUMANE_PROXY_STAGE2_CEILING` | `0.4` | Early exit after Stage 2 |
+| `pipeline.stage3_on_safe` | — | `true` | Run Stage 3 on messages Stages 1-2 marked safe (fail-safe net). `false` restores the cost-saving early exit |
 | `stage2.model` | — | `"all-MiniLM-L6-v2"` | Embedding model name |
 | `stage2.backend` | `HUMANE_PROXY_STAGE2_BACKEND` | `"auto"` | Stage 2 inference: `"auto"`, `"onnx"`, `"sentence-transformers"` |
 | `stage2.safe_threshold` | — | `0.35` | Cosine similarity below this is safe |
+| `stage2.score_ceiling` | — | `0.65` | Cosine at/above this calibrates to score `1.0` |
 | `stage3.provider` | `HUMANE_PROXY_STAGE3_PROVIDER` | `"auto"` | Stage 3 provider |
 | `stage3.timeout` | `HUMANE_PROXY_STAGE3_TIMEOUT` | `10` | Stage 3 timeout (s) |
+| `stage3.openai_moderation.model` | — | `"omni-moderation-latest"` | Moderation model (omni emits `illicit` categories) |
+| `stage3.openai_chat.max_tokens` | — | `1024` | Reply budget; reasoning models need room before the JSON verdict |
+| `stage3.openai_chat.json_mode` | — | `false` | Strict JSON mode; leave off for reasoning models |
 | `trajectory.window_size` | — | `5` | Messages in the rolling risk window |
 | `trajectory.spike_delta` | — | `0.35` | Delta threshold for spike detection |
 | `trajectory.decay_half_life_hours` | `HUMANE_PROXY_DECAY_HALF_LIFE` | `24.0` | Time-decay half-life; `0` disables decay |
