@@ -124,7 +124,7 @@ Full details: [Pipeline documentation](https://github.com/Vishisht16/Humane-Prox
 | `llamaindex` / `crewai` / `autogen` / `langchain` | Native agent-framework tools |
 | `telemetry` | OpenTelemetry distributed tracing |
 | `perf` | orjson fast-path JSON serialization |
-| `all` | Everything above |
+| `all` | Everything above (may cause conflicting dependencies)|
 
 ```bash
 pip install humane-proxy[onnx,mcp]   # a solid production baseline

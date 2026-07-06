@@ -38,8 +38,10 @@ from humane_proxy._json import loads as _json_loads
 
 logger = logging.getLogger("humane_proxy.classifiers.onnx_encoder")
 
+# numpy is a core dependency — only the ONNX stack is optional.
+import numpy as np
+
 try:
-    import numpy as np
     import onnxruntime as _ort
     from huggingface_hub import hf_hub_download
     from tokenizers import Tokenizer
@@ -47,7 +49,6 @@ try:
     ONNX_AVAILABLE = True
 except ImportError:
     ONNX_AVAILABLE = False
-    np = None  # type: ignore[assignment]
     _ort = None  # type: ignore[assignment]
     hf_hub_download = None  # type: ignore[assignment]
     Tokenizer = None  # type: ignore[assignment,misc]
