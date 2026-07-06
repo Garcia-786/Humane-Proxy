@@ -139,9 +139,19 @@ pipeline:
   stage2_ceiling: 0.4
 
 stage2:
-  # Sentence-transformer model name (local).
-  # Requires: pip install humane-proxy[ml]
+  # Embedding model name (resolved against the sentence-transformers
+  # namespace on Hugging Face when no "/" is present).
   model: "all-MiniLM-L6-v2"
+
+  # Inference backend:
+  #   "auto"                  — prefer ONNX Runtime when installed, else
+  #                             sentence-transformers (default)
+  #   "onnx"                  — ONNX Runtime only; no PyTorch needed.
+  #                             Requires: pip install humane-proxy[onnx]
+  #   "sentence-transformers" — PyTorch path.
+  #                             Requires: pip install humane-proxy[ml]
+  # Both backends produce numerically equivalent embeddings.
+  backend: "auto"
 
   # Cosine similarity threshold: scores below this are "safe".
   safe_threshold: 0.35

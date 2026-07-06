@@ -82,16 +82,23 @@ Tests live in the `tests/` directory. We use **pytest** with **pytest-asyncio** 
 | You're changing… | Test file |
 |---|---|
 | Heuristic keyword/regex rules | `test_heuristics.py` |
-| Pipeline cascade logic | `test_pipeline.py` |
+| Pipeline cascade logic | `test_pipeline.py` / `test_pipeline_config_validation.py` |
 | Stage-3 providers | `test_stage3.py` |
-| Embedding classifier | `test_embedding_classifier.py` |
+| Embedding classifier | `test_embedding_classifier.py` / `test_embedding_singleton.py` |
+| ONNX Stage-2 backend | `test_onnx_encoder.py` |
 | Escalation logic / care response | `test_router.py` / `test_care_response.py` |
 | Admin API endpoints | `test_admin_api.py` |
 | Webhooks | `test_webhooks.py` / `test_enhanced_webhooks.py` |
 | Interceptor (FastAPI middleware) | `test_interceptor.py` |
-| Trajectory / risk analysis | `test_trajectory.py` |
+| Trajectory / risk analysis | `test_trajectory.py` / `test_trajectory_redis.py` |
 | Storage backends (SQLite, Redis, PG) | `test_storage_backends.py` |
+| Config loading / env overrides | `test_config.py` |
+| JSON shim (orjson fast path) | `test_json_shim.py` |
 | Framework Integrations (LlamaIndex, CrewAI, AutoGen) | `test_integrations_smoke.py` |
+
+This table is not exhaustive — see `tests/` for the full list (CLI, MCP
+security, telemetry, HTTP client pool, and more). If no existing file
+fits, create a new `test_<area>.py` next to them.
 
 ### Example: adding a heuristic test
 

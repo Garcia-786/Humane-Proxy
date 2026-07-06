@@ -195,10 +195,13 @@ pipeline:
 
 ### Stage 2 — Semantic Embeddings
 
-Requires the `[ml]` extra:
+Requires the `[onnx]` extra (recommended — ONNX Runtime, no PyTorch) or
+the `[ml]` extra (sentence-transformers + PyTorch):
 
 ```bash
-pip install humane-proxy[ml]
+pip install humane-proxy[onnx]   # lightweight, ~2 GB smaller install
+# or
+pip install humane-proxy[ml]     # classic sentence-transformers path
 ```
 
 In `humane_proxy.yaml`:
@@ -210,11 +213,15 @@ pipeline:
 stage2:
   model: "all-MiniLM-L6-v2"   # ~80 MB, downloads once to HuggingFace cache
   safe_threshold: 0.35         # cosine similarity below this → safe
+  backend: "auto"              # "auto" | "onnx" | "sentence-transformers"
 ```
+
+Both backends produce numerically equivalent embeddings; `"auto"`
+(the default) prefers ONNX Runtime when installed.
 
 > **Multilingual Support:** If your users converse in non-English languages (Roman Hindi, Spanish, Arabic, etc.), change the `model` in your configuration to `"paraphrase-multilingual-MiniLM-L12-v2"`. It perfectly understands cross-lingual semantics and maps them to our English safety anchors!
 
-The model lazy-loads on first use. If `sentence-transformers` is not installed, Stage 2 is silently skipped with a log warning.
+The model lazy-loads on first use. If neither backend is installed, Stage 2 is silently skipped with a log warning.
 
 > **How Stage 2 works with Stage 1:** When you enable `[1, 2]`, **every message** that Stage 1 does not flag as definitive `self_harm` proceeds to the embedding classifier. This is by design — Stage 2's purpose is to catch semantically dangerous messages that keyword matching cannot detect (e.g. *"Nobody would notice if I disappeared"*). Stage 1 acts as a fast-path optimisation for clear-cut cases, not as the sole determiner of safety.
 
@@ -365,6 +372,31 @@ Or via environment variable:
 ```bash
 export HUMANE_PROXY_DECAY_HALF_LIFE=12   # 12-hour half-life
 ```
+
+### Multi-Worker Deployments
+
+By default trajectory state lives in process memory, so with
+`uvicorn --workers N` each worker tracks sessions independently. Move it
+to Redis to give every worker one consistent view (requires the
+`[redis]` extra):
+
+```yaml
+trajectory:
+  backend: "redis"   # default: "memory"
+  redis:
+    url: ""          # empty -> reuse storage.redis.url
+    ttl_seconds: 0   # 0 -> auto: 2x decay half-life
+```
+
+Or via environment variable:
+
+```bash
+export HUMANE_PROXY_TRAJECTORY_BACKEND=redis
+```
+
+The window append and baseline read run as one atomic Lua script, and
+sessions auto-expire via TTL. If Redis is unreachable, HumaneProxy logs
+a warning and falls back to in-memory tracking.
 
 ---
 
@@ -585,8 +617,10 @@ All values can be set in `humane_proxy.yaml` (project root) or via `HUMANE_PROXY
 | `pipeline.enabled_stages` | `HUMANE_PROXY_ENABLED_STAGES` | `[1]` | Active stages (e.g. `1,2,3`) |
 | `pipeline.stage1_ceiling` | `HUMANE_PROXY_STAGE1_CEILING` | `0.3` | Early exit after Stage 1 |
 | `pipeline.stage2_ceiling` | `HUMANE_PROXY_STAGE2_CEILING` | `0.4` | Early exit after Stage 2 |
+| `stage2.backend` | `HUMANE_PROXY_STAGE2_BACKEND` | `"auto"` | Stage 2 inference: `"auto"`, `"onnx"`, `"sentence-transformers"` |
 | `stage3.provider` | `HUMANE_PROXY_STAGE3_PROVIDER` | `"auto"` | Stage 3 provider |
 | `stage3.timeout` | `HUMANE_PROXY_STAGE3_TIMEOUT` | `10` | Stage 3 timeout (s) |
+| `trajectory.backend` | `HUMANE_PROXY_TRAJECTORY_BACKEND` | `"memory"` | Trajectory state: `"memory"` (per-process) or `"redis"` (shared) |
 | `privacy.store_message_text` | — | `false` | Store raw text (vs SHA-256 hash) |
 | `escalation.rate_limit_max` | `HUMANE_PROXY_RATE_LIMIT_MAX` | `3` | Max alerts per session/window |
 | `storage.backend` | `HUMANE_PROXY_STORAGE_BACKEND` | `"sqlite"` | `"sqlite"`, `"redis"`, `"postgres"` |
@@ -697,7 +731,8 @@ privacy:
 | Extra | Command | What it adds |
 |---|---|---|
 | *(none)* | `pip install humane-proxy` | Stage 1 heuristics + default SQLite storage |
-| `ml` | `pip install humane-proxy[ml]` | Stage 2 semantic embeddings (`sentence-transformers`) |
+| `ml` | `pip install humane-proxy[ml]` | Stage 2 semantic embeddings via PyTorch (`sentence-transformers`) |
+| `onnx` | `pip install humane-proxy[onnx]` | Stage 2 semantic embeddings via ONNX Runtime — no PyTorch (`onnxruntime`, `tokenizers`, `huggingface_hub`) |
 | `mcp` | `pip install humane-proxy[mcp]` | MCP server for AI agent integration (`fastmcp`) |
 | `redis` | `pip install humane-proxy[redis]` | Redis storage backend (`redis`) |
 | `postgres` | `pip install humane-proxy[postgres]` | PostgreSQL storage backend (`psycopg`, `psycopg_pool`) |
@@ -706,6 +741,7 @@ privacy:
 | `autogen` | `pip install humane-proxy[autogen]` | AutoGen native integration (`autogen-agentchat`) |
 | `langchain` | `pip install humane-proxy[langchain]` | LangChain adapter (MCP + `langchain-mcp-adapters`) |
 | `telemetry` | `pip install humane-proxy[telemetry]` | OpenTelemetry distributed tracing (`opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-grpc`) |
+| `perf` | `pip install humane-proxy[perf]` | Faster JSON serialization on the proxy hot path (`orjson`) |
 | `all` | `pip install humane-proxy[all]` | Includes ALL optional dependencies above |
  
 ---

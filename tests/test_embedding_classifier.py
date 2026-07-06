@@ -64,7 +64,8 @@ class TestEmbeddingClassifierWithMock:
         return EmbeddingClassifier(config or {})
 
     def test_neutral_when_ml_unavailable(self):
-        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False):
+        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False), \
+             patch("humane_proxy.classifiers.onnx_encoder.ONNX_AVAILABLE", False):
             classifier = self._make_classifier()
             result = classifier.classify("test text")
             assert isinstance(result, ClassificationResult)
@@ -73,7 +74,8 @@ class TestEmbeddingClassifierWithMock:
             assert result.stage == 2
 
     def test_is_available_false_when_no_ml(self):
-        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False):
+        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False), \
+             patch("humane_proxy.classifiers.onnx_encoder.ONNX_AVAILABLE", False):
             classifier = self._make_classifier()
             assert classifier.is_available is False
 
@@ -87,7 +89,9 @@ class TestEmbeddingClassifierWithMock:
 
         with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", True):
             with patch("humane_proxy.classifiers.embedding_classifier.SentenceTransformer", return_value=mock_model):
-                classifier = EmbeddingClassifier({})
+                classifier = EmbeddingClassifier(
+                    {"stage2": {"backend": "sentence-transformers"}}
+                )
                 # Force load.
                 classifier._try_load()
 
@@ -112,7 +116,9 @@ class TestEmbeddingClassifierWithMock:
 
         with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", True):
             with patch("humane_proxy.classifiers.embedding_classifier.SentenceTransformer", return_value=mock_model):
-                classifier = EmbeddingClassifier({"stage2": {"safe_threshold": 0.99}})
+                classifier = EmbeddingClassifier(
+                    {"stage2": {"safe_threshold": 0.99, "backend": "sentence-transformers"}}
+                )
                 classifier._try_load()
                 result = classifier.classify("hello")
                 assert result.category == "safe"
@@ -141,7 +147,13 @@ class TestEmbeddingClassifierReal:
     def _make_classifier(self, **stage2_overrides):
         from humane_proxy.classifiers.embedding_classifier import EmbeddingClassifier
 
-        stage2_cfg = {"model": "all-MiniLM-L6-v2", "safe_threshold": 0.35}
+        stage2_cfg = {
+            "model": "all-MiniLM-L6-v2",
+            "safe_threshold": 0.35,
+            # These tests assert sentence-transformers behavior explicitly;
+            # the ONNX backend has its own equivalence suite.
+            "backend": "sentence-transformers",
+        }
         stage2_cfg.update(stage2_overrides)
         return EmbeddingClassifier({"stage2": stage2_cfg})
 
@@ -209,6 +221,7 @@ class TestEmbeddingCaches:
         clf = ec.EmbeddingClassifier({"stage2": {"model": model_name}})
         clf._loaded = True
         clf._model_name = model_name
+        clf._model_key = f"fake:{model_name}"
 
         calls = {"n": 0}
 
@@ -278,6 +291,7 @@ class TestEmbeddingCaches:
             clf = ec.EmbeddingClassifier({"stage2": {"model": "fake-anchor-model"}})
             clf._model = FakeModel()
             clf._model_name = "fake-anchor-model"
+            clf._model_key = "fake:fake-anchor-model"
             clf._precompute_anchors()
             return clf
 

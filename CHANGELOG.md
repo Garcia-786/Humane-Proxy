@@ -6,10 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [0.6.0] - 2026-07-06
 
 ### Added
 
+- **ONNX Runtime Stage-2 backend** (`stage2.backend`, env
+  `HUMANE_PROXY_STAGE2_BACKEND`) — Stage 2 can now run on the model's
+  pre-exported ONNX graph via a new `onnx` extra (`onnxruntime` +
+  `tokenizers` + `huggingface_hub`), with no PyTorch dependency
+  (~2 GB lighter install, faster CPU inference). The default `"auto"`
+  prefers ONNX when installed and falls back to sentence-transformers;
+  both backends produce numerically equivalent embeddings (verified by
+  an equivalence test suite, including truncation parity for long
+  inputs). Model/anchor/result caches are keyed per backend.
 - **Redis-backed trajectory analysis** (`trajectory.backend: redis`, env
   `HUMANE_PROXY_TRAJECTORY_BACKEND`) — session risk windows move to Redis
   sorted sets with an atomic Lua read-append-trim, so every uvicorn

@@ -14,16 +14,23 @@
 
 """Stage-2 embedding classifier — semantic similarity-based safety detection.
 
-Uses ``sentence-transformers`` to encode user messages and compare them
-against pre-defined anchor sentences for each safety category.  The
-cosine similarity between the query embedding and the top-K most similar
-anchors determines the category and score.
+Encodes user messages and compares them against pre-defined anchor
+sentences for each safety category.  The cosine similarity between the
+query embedding and the top-K most similar anchors determines the
+category and score.
 
-**Install:** ``pip install humane-proxy[ml]``
+Two inference backends are supported (config key ``stage2.backend``):
 
-If the ML dependencies are not installed, the classifier returns a
-neutral :class:`ClassificationResult` (category ``"safe"``, score ``0.0``)
-so the pipeline gracefully degrades to Stage 1 only.
+- ``"onnx"`` — ONNX Runtime on the repo's pre-exported graph; no PyTorch.
+  **Install:** ``pip install humane-proxy[onnx]``
+- ``"sentence-transformers"`` — the classic PyTorch path.
+  **Install:** ``pip install humane-proxy[ml]``
+- ``"auto"`` (default) — prefer ONNX when installed, else fall back to
+  sentence-transformers. Both produce numerically equivalent embeddings.
+
+If neither backend is installed, the classifier returns a neutral
+:class:`ClassificationResult` (category ``"safe"``, score ``0.0``) so the
+pipeline gracefully degrades to Stage 1 only.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from collections import OrderedDict
 from typing import Any
 from humane_proxy.telemetry import traced_stage
 from humane_proxy.classifiers.models import ClassificationResult
+from humane_proxy.classifiers import onnx_encoder
 
 logger = logging.getLogger("humane_proxy.classifiers.embedding")
 
@@ -56,14 +64,14 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Process-level model singleton cache.
-# Keyed by model name so different configs don't clash.
+# Keyed by "backend:model_name" so different configs don't clash.
 # ---------------------------------------------------------------------------
 _model_cache: dict[str, Any] = {}
 _model_lock = threading.Lock()
 
-# Anchor embeddings, keyed by model name.  The anchor sentences are static,
-# so encoding them once per process is enough — previously every
-# EmbeddingClassifier instance re-encoded all ~26 anchors, which made
+# Anchor embeddings, keyed by "backend:model_name".  The anchor sentences
+# are static, so encoding them once per process is enough — previously
+# every EmbeddingClassifier instance re-encoded all ~26 anchors, which made
 # per-call pipeline construction (MCP tools, integrations) very expensive.
 # Value: (anchor_embeddings_by_category, benign_embeddings).
 _anchor_cache: dict[str, tuple[dict[str, Any], Any]] = {}
@@ -174,19 +182,33 @@ def _cosine_similarity(a: Any, b: Any) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _load_model_singleton(model_name: str) -> Any:
-    """Load a SentenceTransformer model exactly once per process.
+def _load_model_singleton(model_name: str, backend: str = "sentence-transformers") -> Any:
+    """Load a Stage-2 encoder exactly once per process.
 
-    Thread-safe.  Subsequent calls with the same *model_name* return
-    the cached instance without any disk I/O.
+    Thread-safe.  Subsequent calls with the same *backend* + *model_name*
+    return the cached instance without any disk I/O.
     """
-    if model_name in _model_cache:
-        return _model_cache[model_name]
+    cache_key = f"{backend}:{model_name}"
+    if cache_key in _model_cache:
+        return _model_cache[cache_key]
 
     with _model_lock:
         # Double-check after acquiring lock.
-        if model_name in _model_cache:
-            return _model_cache[model_name]
+        if cache_key in _model_cache:
+            return _model_cache[cache_key]
+
+        if backend == "onnx":
+            if not onnx_encoder.ONNX_AVAILABLE:
+                return None
+            try:
+                model = onnx_encoder.OnnxEncoder(model_name)
+                model.encode(["warmup"], show_progress_bar=False)
+                _model_cache[cache_key] = model
+                logger.info("Stage-2 model loaded and cached: %s", cache_key)
+                return model
+            except Exception:
+                logger.exception("Failed to load ONNX model: %s", model_name)
+                return None
 
         if not _ML_AVAILABLE:
             return None
@@ -198,8 +220,8 @@ def _load_model_singleton(model_name: str) -> Any:
             model = SentenceTransformer(model_name)
             # Warm-up encode to force any lazy JIT / CUDA init.
             model.encode(["warmup"], show_progress_bar=False)
-            _model_cache[model_name] = model
-            logger.info("Stage-2 model loaded and cached: %s", model_name)
+            _model_cache[cache_key] = model
+            logger.info("Stage-2 model loaded and cached: %s", cache_key)
             return model
         except Exception:
             logger.exception("Failed to load embedding model: %s", model_name)
@@ -235,6 +257,8 @@ class EmbeddingClassifier:
         self._config: dict = config.get("stage2", {})
         self._model: Any = None
         self._model_name: str = ""
+        self._backend: str = ""
+        self._model_key: str = ""
         self._anchor_embeddings: dict[str, Any] = {}
         self._benign_embeddings: Any = None
         self._loaded: bool = False
@@ -247,27 +271,60 @@ class EmbeddingClassifier:
         return self._model is not None
 
     def _try_load(self) -> None:
-        """Attempt to load the sentence-transformer model (once)."""
+        """Attempt to load a Stage-2 encoder (once).
+
+        Backend resolution order comes from ``stage2.backend``:
+        ``"auto"`` tries ONNX first (lighter footprint, faster CPU
+        inference), then sentence-transformers; an explicit value tries
+        only that backend.
+        """
         self._loaded = True
-
-        if not _ML_AVAILABLE:
-            logger.info(
-                "Stage-2 disabled: sentence-transformers not installed.  "
-                "Install with: pip install humane-proxy[ml]"
-            )
-            return
-
         self._model_name = self._config.get("model", "all-MiniLM-L6-v2")
-        self._model = _load_model_singleton(self._model_name)
-        if self._model is not None:
-            self._precompute_anchors()
+
+        requested = self._config.get("backend", "auto")
+        orders = {
+            "auto": ["onnx", "sentence-transformers"],
+            "onnx": ["onnx"],
+            "sentence-transformers": ["sentence-transformers"],
+        }
+        order = orders.get(requested)
+        if order is None:
+            logger.warning(
+                "Unknown stage2.backend %r; using auto resolution", requested
+            )
+            order = orders["auto"]
+
+        for backend in order:
+            if backend == "onnx" and not onnx_encoder.ONNX_AVAILABLE:
+                logger.debug("Stage-2 ONNX backend unavailable (not installed)")
+                continue
+            if backend == "sentence-transformers" and not _ML_AVAILABLE:
+                logger.debug(
+                    "Stage-2 sentence-transformers backend unavailable "
+                    "(not installed)"
+                )
+                continue
+            model = _load_model_singleton(self._model_name, backend)
+            if model is not None:
+                self._model = model
+                self._backend = backend
+                self._model_key = f"{backend}:{self._model_name}"
+                logger.info("Stage-2 using %s backend", backend)
+                self._precompute_anchors()
+                return
+
+        logger.info(
+            "Stage-2 disabled: no inference backend available.  Install "
+            "with: pip install humane-proxy[onnx] (ONNX Runtime, no "
+            "PyTorch) or pip install humane-proxy[ml] (sentence-transformers)"
+        )
 
     def _precompute_anchors(self) -> None:
-        """Encode all anchor sentences once per process (per model)."""
-        cached = _anchor_cache.get(self._model_name)
+        """Encode all anchor sentences once per process (per backend+model)."""
+        cached = _anchor_cache.get(self._model_key)
         if cached is None:
             with _model_lock:
-                cached = _anchor_cache.get(self._model_name)
+                cached = _anchor_cache.get(self._model_key)
                 if cached is None:
                     anchor_embeddings = {
                         category: self._model.encode(
@@ -279,7 +336,7 @@ class EmbeddingClassifier:
                         BENIGN_ANCHORS, show_progress_bar=False,
                     )
                     cached = (anchor_embeddings, benign_embeddings)
-                    _anchor_cache[self._model_name] = cached
+                    _anchor_cache[self._model_key] = cached
         self._anchor_embeddings, self._benign_embeddings = cached
         
     @traced_stage("stage2.embeddings")
@@ -296,7 +353,7 @@ class EmbeddingClassifier:
 
         # TTL cache: identical messages within the window skip the encoder.
         cache_key = (
-            self._model_name,
+            self._model_key,
             self._config.get("safe_threshold", 0.35),
             self._config.get("ambiguity_low", 0.30),
             self._config.get("ambiguity_high", 0.55),
