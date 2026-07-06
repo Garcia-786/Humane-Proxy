@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Redis-backed trajectory analysis** (`trajectory.backend: redis`, env
+  `HUMANE_PROXY_TRAJECTORY_BACKEND`) — session risk windows move to Redis
+  sorted sets with an atomic Lua read-append-trim, so every uvicorn
+  worker shares one consistent view of a session's trajectory (the
+  in-memory default tracks per-process). Reuses `storage.redis.url`
+  unless `trajectory.redis.url` is set; sessions auto-expire via TTL
+  (default 2x the decay half-life); falls back to in-memory tracking
+  with a logged warning when Redis is unavailable. `DELETE
+  /admin/sessions/{id}` erasure covers the Redis trajectory keys.
+
 ### Changed
 
 - **orjson JSON fast path** — a new optional `perf` extra installs

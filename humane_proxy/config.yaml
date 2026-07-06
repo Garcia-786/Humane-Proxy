@@ -104,6 +104,26 @@ trajectory:
   #   0   → disable decay entirely (plain unweighted mean)
   decay_half_life_hours: 24.0
 
+  # Where session trajectory state lives:
+  #   "memory" — per-process dicts (default). With multiple uvicorn
+  #              workers, each worker tracks sessions independently.
+  #   "redis"  — shared Redis sorted sets with an atomic Lua
+  #              read-append-trim, giving all workers one consistent
+  #              view. Requires: pip install humane-proxy[redis].
+  #              Falls back to "memory" (with a logged warning) if the
+  #              redis package is missing or the server is unreachable.
+  backend: "memory"
+  redis:
+    # Connection URL. Empty -> reuse storage.redis.url (share the
+    # escalation store's Redis instance).
+    url: ""
+    key_prefix: "humane_proxy:traj:"
+    # Per-session TTL in seconds; sessions idle longer than this expire
+    # automatically (the Redis analogue of in-memory session eviction).
+    # 0 -> auto: 2x decay half-life (min 1 hour), or 7 days when decay
+    # is disabled.
+    ttl_seconds: 0
+
 # ---------------------------------------------------------------------------
 # 3-Stage Cascade Pipeline (Phase 2)
 # ---------------------------------------------------------------------------
