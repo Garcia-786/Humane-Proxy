@@ -17,6 +17,9 @@ and observability.
 All commands are available via both `humane-proxy` and the shorthand `hp`.
 
 ```bash
+# Diagnose the active protection posture (stages, backends, alerting)
+hp doctor
+
 # Safety check
 hp check "I want to end my life"
 # [FLAGGED] self_harm

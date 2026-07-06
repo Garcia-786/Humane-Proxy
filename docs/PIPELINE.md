@@ -72,6 +72,25 @@ pipeline:
 
 ---
 
+## Failure policy — fail open, loudly
+
+If a classifier stage raises at runtime (a corrupt model file, a provider
+outage, an unexpected input), HumaneProxy **fails open**: that stage is
+treated as neutral/safe and the request proceeds, rather than blocking
+every user because one component is broken. But the failure is **loud** —
+logged at `exception` level and tagged on the result (`stage1_error`,
+`stage2_error`, `stage3_error`) so it surfaces in your logs and audit
+trail instead of passing silently.
+
+The reasoning is deliberate for a crisis-detection tool: a hard failure
+that blocks all traffic is itself a harm (users in distress get no
+response at all), so the safe failure mode is to degrade gracefully and
+make the degradation impossible to miss. Run `hp doctor` to check the
+active posture, and keep `startup_warnings` on so missing stages are
+flagged at boot.
+
+---
+
 ## Stage 1 — Heuristics
 
 Keyword and intent-pattern matching, always on, sub-millisecond, zero

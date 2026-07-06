@@ -222,13 +222,16 @@ def _diagnose() -> dict:
     )
 
     webhooks = cfg.get("escalation", {}).get("webhooks", {}) or {}
+    email_cfg = webhooks.get("email") or {}
+    # A channel counts only when it carries a real value — the default
+    # config ships empty url strings and an empty email block.
     alert_channels = [
         name for name, val in (
             ("slack", webhooks.get("slack_url")),
             ("discord", webhooks.get("discord_url")),
             ("teams", webhooks.get("teams_url")),
             ("pagerduty", webhooks.get("pagerduty_routing_key")),
-            ("email", webhooks.get("email")),
+            ("email", email_cfg.get("host") and email_cfg.get("to")),
         ) if val
     ]
 
@@ -328,6 +331,58 @@ def start(host: str | None, port: int | None, reload: bool | None) -> None:
         port=final_port,
         reload=final_reload,
     )
+
+
+@main.command()
+def doctor() -> None:
+    """Diagnose the active protection posture (stages, backends, alerting)."""
+    click.echo(_BANNER)
+    d = _diagnose()
+
+    def line(ok: bool, label: str, detail: str) -> None:
+        tag = "[OK]  " if ok else "[WARN]"
+        click.echo(f"  {tag} {label:<22} {detail}")
+
+    stages = d["enabled_stages"]
+    click.echo("  Protection posture\n")
+
+    line(1 in stages, "Stage 1 heuristics", "always on" if 1 in stages else "OFF")
+    line(
+        2 in stages, "Stage 2 embeddings",
+        "enabled" if 2 in stages else (
+            "backend installed but OFF" if d["stage2_backend_available"]
+            else "OFF — pip install humane-proxy[onnx]"
+        ),
+    )
+    line(
+        3 in stages, "Stage 3 reasoning",
+        "enabled" if 3 in stages else (
+            "available (provider ready) but OFF" if d["stage3_provider_ready"]
+            else "OFF — set OPENAI_API_KEY or GROQ_API_KEY"
+        ),
+    )
+    line(
+        3 not in stages or d["stage3_provider_ready"], "Stage 3 provider",
+        f"{d['stage3_provider']} "
+        f"(openai_key={'yes' if d['has_openai_key'] else 'no'}, "
+        f"groq_key={'yes' if d['has_groq_key'] else 'no'})",
+    )
+    line(True, "Storage backend", d["storage_backend"])
+    line(True, "Trajectory backend", d["trajectory_backend"])
+    line(
+        bool(d["alert_channels"]), "Alert channels",
+        ", ".join(d["alert_channels"]) if d["alert_channels"]
+        else "none configured — operators won't be notified",
+    )
+
+    click.echo("")
+    if 3 in stages:
+        click.echo("  [OK]   Full 3-stage cascade active.")
+    elif 2 in stages:
+        click.echo("  [INFO] Stages 1+2 active. Enable Stage 3 for maximum recall (benchmarked 92%).")
+    else:
+        click.echo("  [WARN] Stage 1 only — install an embedding backend for far stronger detection.")
+    click.echo("")
 
 
 @main.command()

@@ -121,7 +121,6 @@ class SafetyPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
-    @staticmethod
     def _resolve_stages(raw: Any) -> list[int]:
         """Resolve ``enabled_stages``, expanding the ``"auto"`` default.
 
@@ -276,7 +275,7 @@ class SafetyPipeline:
     ) -> PipelineResult:
         """Run the full async pipeline (Stages 1 + 2 + 3)."""
         # Stage 1 — Heuristics (always).
-        result = self._run_stage1(text)
+        result = self._run_stage1_safe(text)
 
         # Early exit: clear dangerous (self_harm).
         if result.category == "self_harm":
@@ -299,7 +298,7 @@ class SafetyPipeline:
 
         # Stage 2 — Embeddings (if enabled).
         if stage2_enabled:
-            s2 = self._stage2.classify(text)
+            s2 = self._run_stage2_safe(text)
             result = self._combine(result, s2)
 
             # Early exit after Stage 2.
@@ -338,7 +337,7 @@ class SafetyPipeline:
         self, text: str, session_id: str
     ) -> PipelineResult:
         """Run the synchronous pipeline (Stages 1 + 2 only — no async)."""
-        result = self._run_stage1(text)
+        result = self._run_stage1_safe(text)
 
         if result.category == "self_harm":
             return self._finalize(result, session_id, text)
@@ -352,10 +351,39 @@ class SafetyPipeline:
             return self._finalize(result, session_id, text)
 
         if stage2_enabled:
-            s2 = self._stage2.classify(text)
+            s2 = self._run_stage2_safe(text)
             result = self._combine(result, s2)
 
         return self._finalize(result, session_id, text)
+
+    # ------------------------------------------------------------------
+    # Fail-open-loudly wrappers
+    #
+    # Policy: a classifier that raises must never take down the request.
+    # HumaneProxy fails OPEN (treats the stage as neutral/safe) so a
+    # corrupt model or provider outage cannot block every user — but it
+    # logs the failure LOUDLY (logger.exception) and tags the result, so
+    # the degradation is visible in logs and the audit trail rather than
+    # silent. See docs/PIPELINE.md ("Failure policy").
+    # ------------------------------------------------------------------
+
+    def _run_stage1_safe(self, text: str) -> ClassificationResult:
+        try:
+            return self._run_stage1(text)
+        except Exception:
+            logger.exception("Stage-1 heuristics failed — failing open (safe)")
+            return ClassificationResult(
+                category="safe", score=0.0, triggers=["stage1_error"], stage=1
+            )
+
+    def _run_stage2_safe(self, text: str) -> ClassificationResult:
+        try:
+            return self._stage2.classify(text)
+        except Exception:
+            logger.exception("Stage-2 embeddings failed — failing open (safe)")
+            return ClassificationResult(
+                category="safe", score=0.0, triggers=["stage2_error"], stage=2
+            )
 
     # ------------------------------------------------------------------
     # Stage 1 wrapper
