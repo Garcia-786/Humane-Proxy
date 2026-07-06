@@ -38,6 +38,17 @@ from humane_proxy.classifiers.models import (
 
 logger = logging.getLogger("humane_proxy.pipeline")
 
+
+def stage2_backend_available() -> bool:
+    """Return True if any embedding backend (ONNX or ST) is importable.
+
+    Checks module-level availability flags only — no model is loaded.
+    """
+    from humane_proxy.classifiers import onnx_encoder
+    from humane_proxy.classifiers import embedding_classifier as ec
+
+    return onnx_encoder.ONNX_AVAILABLE or ec._ML_AVAILABLE
+
 _stage3_warning_shown = False
 
 
@@ -68,8 +79,8 @@ class SafetyPipeline:
 
         # Malformed values fall back to safe defaults instead of raising —
         # a broken config must never take the safety pipeline down.
-        self.enabled_stages: list[int] = self._validate_stages(
-            pipeline_cfg.get("enabled_stages", [1])
+        self.enabled_stages: list[int] = self._resolve_stages(
+            pipeline_cfg.get("enabled_stages", "auto")
         )
         self.stage1_ceiling: float = self._as_float(
             pipeline_cfg.get("stage1_ceiling", 0.3), 0.3, "pipeline.stage1_ceiling"
@@ -108,6 +119,26 @@ class SafetyPipeline:
     # ------------------------------------------------------------------
     # Initialisation helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    @staticmethod
+    def _resolve_stages(raw: Any) -> list[int]:
+        """Resolve ``enabled_stages``, expanding the ``"auto"`` default.
+
+        ``"auto"`` enables Stage 1 always, plus Stage 2 when an embedding
+        backend (ONNX or sentence-transformers) is importable — so
+        ``pip install humane-proxy[onnx]`` yields full 1+2 protection with
+        zero config. Stage 3 stays opt-in (it carries per-call cost and
+        latency); the CLI nudges operators to enable it. Any explicit
+        list is passed through unchanged.
+        """
+        if isinstance(raw, str) and raw.strip().lower() == "auto":
+            stages = [1]
+            if stage2_backend_available():
+                stages.append(2)
+            logger.info("pipeline.enabled_stages: auto -> %s", stages)
+            return stages
+        return SafetyPipeline._validate_stages(raw)
 
     @staticmethod
     def _validate_stages(raw: Any) -> list[int]:

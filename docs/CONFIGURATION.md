@@ -29,7 +29,8 @@ example [`humane_proxy.yaml`](../humane_proxy.yaml) from the repository root.
 | `safety.spike_boost` | `HUMANE_PROXY_SPIKE_BOOST` | `0.25` | Score boost on trajectory spike |
 | `server.host` | `HUMANE_PROXY_HOST` | `127.0.0.1` | Proxy bind address |
 | `server.port` | `HUMANE_PROXY_PORT` | `8000` | Proxy port |
-| `pipeline.enabled_stages` | `HUMANE_PROXY_ENABLED_STAGES` | `[1]` | Active stages (e.g. `1,2,3`) |
+| `pipeline.enabled_stages` | `HUMANE_PROXY_ENABLED_STAGES` | `"auto"` | Active stages. `"auto"` = Stage 1 + Stage 2 when an embedding backend is installed; Stage 3 stays opt-in. Or an explicit list (e.g. `1,2,3`) |
+| `startup_warnings` | — | `true` | Print fail-safe setup nudges at startup when stronger protection is available but off |
 | `pipeline.stage1_ceiling` | `HUMANE_PROXY_STAGE1_CEILING` | `0.3` | Early exit after Stage 1 |
 | `pipeline.stage2_ceiling` | `HUMANE_PROXY_STAGE2_CEILING` | `0.4` | Early exit after Stage 2 |
 | `pipeline.stage3_on_safe` | — | `true` | Run Stage 3 on messages Stages 1-2 marked safe (fail-safe net). `false` restores the cost-saving early exit |

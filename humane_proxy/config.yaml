@@ -129,14 +129,26 @@ trajectory:
     # is disabled.
     ttl_seconds: 0
 
+# Fail-safe setup nudges: print [WARN]/[INFO] lines at startup (hp start,
+# mcp-serve) when a stronger protection stage is available but not enabled
+# — e.g. an embedding backend is installed but Stage 2 is off, or a
+# Stage-3 provider key is present but Stage 3 is not enabled. Set false to
+# silence these nudges (they never block startup).
+startup_warnings: true
+
 # ---------------------------------------------------------------------------
 # 3-Stage Cascade Pipeline (Phase 2)
 # ---------------------------------------------------------------------------
 
 pipeline:
-  # Which stages to enable. [1] = heuristics only, [1,2] = +embeddings,
-  # [1,2,3] = full pipeline with reasoning LLM.
-  enabled_stages: [1]
+  # Which stages to enable.
+  #   "auto"  = Stage 1 always + Stage 2 when an embedding backend is
+  #             installed ([onnx] or [ml]); Stage 3 stays opt-in (default).
+  #   [1]     = heuristics only.
+  #   [1,2]   = + embeddings.
+  #   [1,2,3] = full pipeline with the reasoning LLM.
+  # With "auto", `pip install humane-proxy[onnx]` gives 1+2 with no config.
+  enabled_stages: "auto"
 
   # Early-exit ceilings: if the combined score is below this after the
   # given stage AND category is "safe", skip remaining stages.

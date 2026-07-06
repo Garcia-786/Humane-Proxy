@@ -191,6 +191,111 @@ def init() -> None:
         click.echo("\n  [INFO] Nothing to create — files already exist.")
 
 
+def _diagnose() -> dict:
+    """Summarize the active protection posture without loading any model.
+
+    Returns a dict describing resolved stages, Stage-2 backend
+    availability, Stage-3 provider readiness, storage, and alerting —
+    shared by the startup nudges and ``hp doctor``.
+    """
+    import os
+
+    from humane_proxy.config import get_config
+    from humane_proxy.classifiers.pipeline import (
+        SafetyPipeline,
+        stage2_backend_available,
+    )
+
+    cfg = get_config()
+    pipeline_cfg = cfg.get("pipeline", {})
+    raw_stages = pipeline_cfg.get("enabled_stages", "auto")
+    stages = SafetyPipeline._resolve_stages(raw_stages)
+
+    stage2_ok = stage2_backend_available()
+
+    stage3_cfg = cfg.get("stage3", {})
+    provider = stage3_cfg.get("provider", "auto")
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    has_groq = bool(os.environ.get("GROQ_API_KEY"))
+    stage3_provider_ready = (
+        provider not in ("auto", "none") or has_openai or has_groq
+    )
+
+    webhooks = cfg.get("escalation", {}).get("webhooks", {}) or {}
+    alert_channels = [
+        name for name, val in (
+            ("slack", webhooks.get("slack_url")),
+            ("discord", webhooks.get("discord_url")),
+            ("teams", webhooks.get("teams_url")),
+            ("pagerduty", webhooks.get("pagerduty_routing_key")),
+            ("email", webhooks.get("email")),
+        ) if val
+    ]
+
+    return {
+        "enabled_stages": stages,
+        "stage2_backend_available": stage2_ok,
+        "stage3_provider": provider,
+        "stage3_provider_ready": stage3_provider_ready,
+        "has_openai_key": has_openai,
+        "has_groq_key": has_groq,
+        "storage_backend": cfg.get("storage", {}).get("backend", "sqlite"),
+        "trajectory_backend": cfg.get("trajectory", {}).get("backend", "memory"),
+        "alert_channels": alert_channels,
+        "startup_warnings": bool(cfg.get("startup_warnings", True)),
+    }
+
+
+def _print_setup_warnings(err: bool = False) -> None:
+    """Print fail-safe nudges when stronger protection is available but off.
+
+    Gated by ``startup_warnings`` (default true). Never blocks startup.
+    Pass ``err=True`` to route to stderr (required for stdio MCP, whose
+    stdout carries the protocol).
+    """
+    d = _diagnose()
+    if not d["startup_warnings"]:
+        return
+
+    stages = d["enabled_stages"]
+
+    if 2 not in stages and not d["stage2_backend_available"]:
+        click.echo(
+            "  [WARN] Stage 2 (semantic embeddings) is OFF — install a "
+            "backend for far stronger detection:\n"
+            "         pip install humane-proxy[onnx]   (no PyTorch, ~5ms/msg)",
+            err=err,
+        )
+    elif 2 not in stages and d["stage2_backend_available"]:
+        click.echo(
+            "  [WARN] Stage 2 backend is installed but Stage 2 is OFF — set "
+            "pipeline.enabled_stages: \"auto\" (or [1,2]) to enable it.",
+            err=err,
+        )
+
+    if 3 not in stages:
+        if d["stage3_provider_ready"]:
+            click.echo(
+                "  [INFO] Stage 3 (reasoning LLM) is available — add 3 to "
+                "pipeline.enabled_stages for maximum recall (benchmarked 92%).",
+                err=err,
+            )
+        else:
+            click.echo(
+                "  [INFO] Stage 3 (reasoning LLM) is OFF — set OPENAI_API_KEY "
+                "(free OpenAI Moderation) or GROQ_API_KEY, then enable stage 3.",
+                err=err,
+            )
+
+    if not d["alert_channels"]:
+        click.echo(
+            "  [INFO] No alert channels configured — operators will not be "
+            "notified on escalation. See escalation.webhooks in your config.",
+            err=err,
+        )
+    click.echo("", err=err)
+
+
 @main.command()
 @click.option("--host", default=None, help="Bind host (default: from config)")
 @click.option("--port", "-p", default=None, type=int, help="Bind port (default: from config)")
@@ -212,6 +317,8 @@ def start(host: str | None, port: int | None, reload: bool | None) -> None:
     if final_reload:
         click.echo("  [INFO] Auto-reload enabled")
     click.echo("")
+
+    _print_setup_warnings()
 
     import uvicorn
 
@@ -710,6 +817,8 @@ def mcp_serve(transport: str, host: str, port: int) -> None:
     Use --transport http for HTTP access. Set HUMANE_PROXY_ADMIN_KEY
     before exposing HTTP MCP beyond localhost.
     """
+    # Nudges to stderr — stdio MCP's stdout carries the protocol.
+    _print_setup_warnings(err=True)
     try:
         if transport == "http":
             from humane_proxy.mcp_server import serve_http
