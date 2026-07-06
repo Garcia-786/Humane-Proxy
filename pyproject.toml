@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
-    {name = "Vishisht Mishra", email = "Vishisht16@users.noreply.github.com"},
+    {name = "Vishisht Mishra", email = "mishra@vishisht.tech"},
 ]
 keywords = ["ai-safety", "llm", "middleware", "guardrails", "human-safety"]
 classifiers = [

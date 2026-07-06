@@ -2,11 +2,14 @@
 
 ## Supported Versions
 
+v0.5.6 is the first stable release; everything before it was published as
+a pre-release and is not supported.
+
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | Yes |
-| 0.4.x   | Critical fixes only |
-| < 0.4   | No |
+| 0.6.x | Yes |
+| 0.5.6 - 0.5.7 | Critical fixes only |
+| < 0.5.6 | No (pre-releases) |
 
 ## Reporting a Vulnerability
 
