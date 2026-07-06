@@ -333,7 +333,12 @@ def session(session_id: str) -> None:
               help="CI mode: exit with code 1 if any test case fails.")
 @click.option("--stages", default="1,2",
               help="Comma-separated pipeline stages to run. Default: '1,2'")
-def benchmark(dataset: str, ci: bool, stages: str) -> None:
+@click.option("--verbose", "-v", is_flag=True, default=False,
+              help="Show every test case. Default: full table only for small "
+                   "datasets; large runs list failures only.")
+@click.option("--json-out", type=click.Path(), default=None,
+              help="Write metrics and per-case results to a JSON file.")
+def benchmark(dataset: str, ci: bool, stages: str, verbose: bool, json_out: str | None) -> None:
     """Run an evaluation dataset through the safety pipeline and report results.
 
     The dataset must be a JSON file containing an array of objects, each with
@@ -405,6 +410,7 @@ def benchmark(dataset: str, ci: bool, stages: str) -> None:
                 "actual": actual,
                 "passed": passed,
                 "score": result.get("score", 0.0),
+                "stage": result.get("stage_reached", 1),
                 "latency_ms": elapsed_ms,
             })
 
@@ -416,10 +422,27 @@ def benchmark(dataset: str, ci: bool, stages: str) -> None:
     passed_count = sum(1 for r in results if r["passed"])
     failed_count = total - passed_count
 
-    latencies = [r["latency_ms"] for r in results]
+    latencies = sorted(r["latency_ms"] for r in results)
     avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
-    min_latency = min(latencies) if latencies else 0.0
-    max_latency = max(latencies) if latencies else 0.0
+    min_latency = latencies[0] if latencies else 0.0
+    max_latency = latencies[-1] if latencies else 0.0
+    p50_latency = latencies[len(latencies) // 2] if latencies else 0.0
+    p95_latency = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else 0.0
+
+    # Binary safe/unsafe metrics. Category confusion between the two harm
+    # classes still counts as detection here; a safety proxy's first job
+    # is not letting harm through, and its second is not over-blocking.
+    unsafe_expected = [r for r in results if r["expected"] != "safe"]
+    safe_expected = [r for r in results if r["expected"] == "safe"]
+    detected = sum(1 for r in unsafe_expected if r["actual"] != "safe")
+    false_positives = sum(1 for r in safe_expected if r["actual"] != "safe")
+    harm_recall = detected / len(unsafe_expected) if unsafe_expected else None
+    false_positive_rate = false_positives / len(safe_expected) if safe_expected else None
+
+    # Which stage produced the final verdict, per message.
+    stage_counts: dict[int, int] = {}
+    for r in results:
+        stage_counts[r["stage"]] = stage_counts.get(r["stage"], 0) + 1
 
     # Per-category precision/recall/F1
     cat_metrics = {}
@@ -443,35 +466,51 @@ def benchmark(dataset: str, ci: bool, stages: str) -> None:
     # --- Display results ---
     if _RICH:
         import io
-        # Force UTF-8 output to avoid Windows cp1252 encoding errors
-        utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        console = Console(file=utf8_stdout)
-
-        # Individual results table
-        detail_table = Table(title="Test Results", show_lines=True)
-        detail_table.add_column("#", style="dim", width=4)
-        detail_table.add_column("Message", max_width=50)
-        detail_table.add_column("Expected", style="cyan")
-        detail_table.add_column("Actual", style="cyan")
-        detail_table.add_column("Score", justify="right")
-        detail_table.add_column("Latency", justify="right")
-        detail_table.add_column("Result", justify="center")
-
-        for i, r in enumerate(results):
-            result_text = Text("PASS", style="green bold") if r["passed"] else Text("FAIL", style="red bold")
-            actual_style = "green" if r["passed"] else "red bold"
-            detail_table.add_row(
-                str(i + 1),
-                r["message"][:50],
-                r["expected"],
-                Text(r["actual"], style=actual_style),
-                f"{r['score']:.2f}",
-                f"{r['latency_ms']:.1f}ms",
-                result_text,
+        # Force UTF-8 output to avoid Windows cp1252 encoding errors.
+        # Falls back to a plain Console when stdout has no raw buffer
+        # (e.g. under test runners that substitute sys.stdout).
+        utf8_stdout = None
+        try:
+            utf8_stdout = io.TextIOWrapper(
+                sys.stdout.buffer, encoding="utf-8", errors="replace"
             )
+        except (AttributeError, io.UnsupportedOperation, ValueError):
+            pass
+        console = Console(file=utf8_stdout) if utf8_stdout else Console()
 
-        console.print(detail_table)
-        console.print()
+        # Individual results table. Large runs collapse to failures only
+        # unless --verbose is passed.
+        show_all = verbose or total <= 40
+        shown = results if show_all else [r for r in results if not r["passed"]][:25]
+        title = "Test Results" if show_all else (
+            f"Failures (first {len(shown)} of {failed_count} — use --verbose for all cases)"
+        )
+
+        if shown:
+            detail_table = Table(title=title, show_lines=True)
+            detail_table.add_column("#", style="dim", width=4)
+            detail_table.add_column("Message", max_width=50)
+            detail_table.add_column("Expected", style="cyan")
+            detail_table.add_column("Actual", style="cyan")
+            detail_table.add_column("Score", justify="right")
+            detail_table.add_column("Latency", justify="right")
+            detail_table.add_column("Result", justify="center")
+
+            for i, r in enumerate(shown):
+                result_text = Text("PASS", style="green bold") if r["passed"] else Text("FAIL", style="red bold")
+                actual_style = "green" if r["passed"] else "red bold"
+                detail_table.add_row(
+                    str(i + 1),
+                    r["message"][:50],
+                    r["expected"],
+                    Text(r["actual"], style=actual_style),
+                    f"{r['score']:.2f}",
+                    f"{r['latency_ms']:.1f}ms",
+                    result_text,
+                )
+
+            console.print(detail_table)
+            console.print()
 
         # Per-category metrics table
         metrics_table = Table(title="Per-Category Metrics")
@@ -504,17 +543,39 @@ def benchmark(dataset: str, ci: bool, stages: str) -> None:
         summary_text.append(f"Accuracy: {accuracy:.1%}", style=acc_style)
         summary_text.append(f"  |  Passed: {passed_count}/{total}")
         summary_text.append(f"  |  Failed: {failed_count}")
-        summary_text.append(f"\nLatency — avg: {avg_latency:.1f}ms  min: {min_latency:.1f}ms  max: {max_latency:.1f}ms")
+        if harm_recall is not None:
+            summary_text.append(f"\nHarm detection rate: {harm_recall:.1%} ({detected}/{len(unsafe_expected)} unsafe prompts flagged)")
+        if false_positive_rate is not None:
+            summary_text.append(f"\nFalse positive rate: {false_positive_rate:.1%} ({false_positives}/{len(safe_expected)} safe prompts flagged)")
+        stage_parts = "  ".join(
+            f"stage {s}: {n} ({n / total:.0%})" for s, n in sorted(stage_counts.items())
+        )
+        summary_text.append(f"\nVerdict stage — {stage_parts}")
+        summary_text.append(
+            f"\nLatency — avg: {avg_latency:.1f}ms  p50: {p50_latency:.1f}ms  "
+            f"p95: {p95_latency:.1f}ms  min: {min_latency:.1f}ms  max: {max_latency:.1f}ms"
+        )
 
         panel_style = "green" if failed_count == 0 else "red"
         console.print(Panel(summary_text, title="Benchmark Summary", border_style=panel_style))
 
+        if utf8_stdout is not None:
+            # Release the raw buffer without closing it — later click.echo
+            # calls still write to the original stdout.
+            utf8_stdout.flush()
+            utf8_stdout.detach()
+
     else:
         # Fallback plain text output
-        click.echo("  Results:")
+        show_all = verbose or total <= 40
+        shown = results if show_all else [r for r in results if not r["passed"]][:25]
+        if not show_all:
+            click.echo(f"  Failures (first {len(shown)} of {failed_count} — use --verbose for all cases):")
+        else:
+            click.echo("  Results:")
         click.echo(f"  {'#':<4} {'Expected':<18} {'Actual':<18} {'Score':<8} {'Latency':<10} {'Result'}")
         click.echo("  " + "-" * 80)
-        for i, r in enumerate(results):
+        for i, r in enumerate(shown):
             status = "PASS" if r["passed"] else "FAIL"
             click.echo(
                 f"  {i+1:<4} {r['expected']:<18} {r['actual']:<18} "
@@ -522,7 +583,17 @@ def benchmark(dataset: str, ci: bool, stages: str) -> None:
             )
 
         click.echo(f"\n  Accuracy: {accuracy:.1%} ({passed_count}/{total})")
-        click.echo(f"  Latency — avg: {avg_latency:.1f}ms  min: {min_latency:.1f}ms  max: {max_latency:.1f}ms")
+        if harm_recall is not None:
+            click.echo(f"  Harm detection rate: {harm_recall:.1%} ({detected}/{len(unsafe_expected)})")
+        if false_positive_rate is not None:
+            click.echo(f"  False positive rate: {false_positive_rate:.1%} ({false_positives}/{len(safe_expected)})")
+        click.echo("  Verdict stage — " + "  ".join(
+            f"stage {s}: {n} ({n / total:.0%})" for s, n in sorted(stage_counts.items())
+        ))
+        click.echo(
+            f"  Latency — avg: {avg_latency:.1f}ms  p50: {p50_latency:.1f}ms  "
+            f"p95: {p95_latency:.1f}ms  min: {min_latency:.1f}ms  max: {max_latency:.1f}ms"
+        )
 
         for cat in categories:
             m = cat_metrics[cat]
@@ -532,6 +603,26 @@ def benchmark(dataset: str, ci: bool, stages: str) -> None:
             )
 
     click.echo("")
+
+    if json_out:
+        payload = {
+            "dataset": dataset,
+            "stages": stages,
+            "total": total,
+            "accuracy": accuracy,
+            "harm_recall": harm_recall,
+            "false_positive_rate": false_positive_rate,
+            "stage_counts": {str(k): v for k, v in sorted(stage_counts.items())},
+            "latency_ms": {
+                "avg": avg_latency, "p50": p50_latency, "p95": p95_latency,
+                "min": min_latency, "max": max_latency,
+            },
+            "categories": cat_metrics,
+            "results": results,
+        }
+        with open(json_out, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        click.echo(f"  [INFO] Metrics written to {json_out}\n")
 
     if ci and failed_count > 0:
         click.echo(f"  [FAIL] CI mode: {failed_count} test case(s) failed. Exiting with code 1.")

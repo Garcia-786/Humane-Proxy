@@ -54,3 +54,9 @@ mcp-publisher
 
 # Maintainer notes
 notes/
+
+# Fetched third-party benchmark datasets (evals/fetch.py) and local runs.
+# evals/sample.json is first-party and stays tracked.
+evals/*.json
+!evals/sample.json
+benchmark_*.json
