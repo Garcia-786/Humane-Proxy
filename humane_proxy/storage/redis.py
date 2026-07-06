@@ -5,12 +5,12 @@ Requires: pip install humane-proxy[redis]
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from humane_proxy._json import dumps as _json_dumps, loads as _json_loads
 from humane_proxy.storage.base import EscalationStore
 
 logger = logging.getLogger("humane_proxy.storage.redis")
@@ -100,7 +100,7 @@ class RedisStore(EscalationStore):
             "session_id": session_id,
             "category": category,
             "risk_score": str(risk_score),
-            "triggers": json.dumps(triggers or []),
+            "triggers": _json_dumps(triggers or []),
             "timestamp": str(ts),
             "message_hash": message_hash or "",
             "stage_reached": str(stage_reached),
@@ -236,7 +236,7 @@ class RedisStore(EscalationStore):
             "reasoning": raw.get("reasoning") or None,
         }
         try:
-            rec["triggers"] = json.loads(raw.get("triggers", "[]"))
+            rec["triggers"] = _json_loads(raw.get("triggers", "[]"))
         except Exception:
             rec["triggers"] = []
         return rec

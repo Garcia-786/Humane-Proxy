@@ -44,6 +44,7 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "httpx",
+    "humane-proxy[perf]",
 ]
 ml = [
     "sentence-transformers>=2.2.0",
@@ -80,8 +81,11 @@ telemetry = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
 ]
+perf = [
+    "orjson>=3.9",
+]
 all = [
-    "humane-proxy[ml,mcp,langchain,redis,postgres,llamaindex,crewai,autogen,telemetry]",
+    "humane-proxy[ml,mcp,langchain,redis,postgres,llamaindex,crewai,autogen,telemetry,perf]",
 ]
 
 [project.urls]

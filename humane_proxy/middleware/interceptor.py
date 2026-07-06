@@ -20,6 +20,27 @@ from json import JSONDecodeError
 
 logger = logging.getLogger("humane_proxy")
 
+
+def _select_response_class() -> type[JSONResponse]:
+    """Pick the fastest available JSON response class.
+
+    A local subclass is used instead of fastapi.responses.ORJSONResponse,
+    which is deprecated in current FastAPI releases.
+    """
+    from humane_proxy._json import ORJSON_AVAILABLE
+    if ORJSON_AVAILABLE:
+        import orjson
+
+        class _OrjsonResponse(JSONResponse):
+            def render(self, content: Any) -> bytes:
+                return orjson.dumps(content)
+
+        return _OrjsonResponse
+    return JSONResponse
+
+
+_Response = _select_response_class()
+
 _pipeline = None
 
 
@@ -114,7 +135,7 @@ async def chat(request: Request) -> JSONResponse:
     try:
         payload: dict[str, Any] = await request.json()
     except (JSONDecodeError, ValueError):
-        return JSONResponse(
+        return _Response(
            status_code=400,
            content={
               "status": "error",
@@ -127,7 +148,7 @@ async def chat(request: Request) -> JSONResponse:
     user_message = _extract_last_user_message(payload)
 
     if not user_message:
-        return JSONResponse(
+        return _Response(
             status_code=400,
             content={"status": "error", "message": "No user message found in payload."},
         )
@@ -153,7 +174,7 @@ async def chat(request: Request) -> JSONResponse:
             care = get_self_harm_response(payload)
 
             if care["mode"] == "block":
-                return JSONResponse(
+                return _Response(
                     status_code=200,
                     content={
                         "status": "care_response",
@@ -167,7 +188,7 @@ async def chat(request: Request) -> JSONResponse:
                 payload = care["payload"]
 
         else:
-            return JSONResponse(
+            return _Response(
                 status_code=200,
                 content={
                     "status": "flagged",
@@ -184,7 +205,7 @@ async def chat(request: Request) -> JSONResponse:
     llm_api_url = os.environ.get("LLM_API_URL", "")
     llm_api_key = os.environ.get("LLM_API_KEY", "")
     if not llm_api_url:
-        return JSONResponse(
+        return _Response(
             status_code=503,
             content={"status": "error", "message": "LLM_API_URL is not configured."},
         )
@@ -216,7 +237,7 @@ async def chat(request: Request) -> JSONResponse:
                 "status": "error",
                 "message": f"Upstream returned non-JSON (HTTP {llm_response.status_code}).",
             }
-        return JSONResponse(status_code=llm_response.status_code, content=body)
+        return _Response(status_code=llm_response.status_code, content=body)
 
     except httpx.RequestError as exc:
         # Exception text can carry the upstream URL and internal network
@@ -224,7 +245,7 @@ async def chat(request: Request) -> JSONResponse:
         logger.warning(
             "Upstream LLM request failed: %s: %s", type(exc).__name__, exc
         )
-        return JSONResponse(
+        return _Response(
             status_code=503,
             content={"status": "error", "message": "Upstream LLM unavailable."},
         )

@@ -5,11 +5,11 @@ Requires: pip install humane-proxy[postgres]
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from humane_proxy._json import dumps as _json_dumps, loads as _json_loads
 from humane_proxy.storage.base import EscalationStore
 
 logger = logging.getLogger("humane_proxy.storage.postgres")
@@ -157,7 +157,7 @@ class PostgresStore(EscalationStore):
                     session_id,
                     category,
                     risk_score,
-                    json.dumps(triggers or []),
+                    _json_dumps(triggers or []),
                     ts,
                     message_hash,
                     stage_reached,
@@ -325,7 +325,7 @@ class PostgresStore(EscalationStore):
     def _parse(row: dict[str, Any]) -> dict[str, Any]:
         rec = dict(row)
         try:
-            rec["triggers"] = json.loads(rec["triggers"])
+            rec["triggers"] = _json_loads(rec["triggers"])
         except Exception:
             pass
         return rec

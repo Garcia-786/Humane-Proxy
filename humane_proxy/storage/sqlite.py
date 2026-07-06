@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
@@ -10,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from humane_proxy._json import dumps as _json_dumps, loads as _json_loads
 from humane_proxy.storage.base import EscalationStore
 
 logger = logging.getLogger("humane_proxy.storage.sqlite")
@@ -171,7 +171,7 @@ class SQLiteStore(EscalationStore):
                         session_id,
                         category,
                         risk_score,
-                        json.dumps(triggers or []),
+                        _json_dumps(triggers or []),
                         datetime.now(timezone.utc).timestamp(),
                         message_hash,
                         stage_reached,
@@ -350,7 +350,7 @@ class SQLiteStore(EscalationStore):
         """Convert a raw SQLite row tuple to a dict with parsed triggers."""
         rec: dict[str, Any] = dict(zip(cls._COLS, row))
         try:
-            rec["triggers"] = json.loads(rec["triggers"])
+            rec["triggers"] = _json_loads(rec["triggers"])
         except Exception:
             pass
         return rec

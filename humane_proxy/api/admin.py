@@ -21,7 +21,6 @@ from __future__ import annotations
 import csv
 import hmac
 import io
-import json
 import logging
 import os
 import time
@@ -32,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from humane_proxy._json import dumps as _json_dumps
 from humane_proxy.storage.factory import get_store
 
 logger = logging.getLogger("humane_proxy.api.admin")
@@ -215,7 +215,7 @@ def export_escalations(
         row = dict(item)
         # Normalize triggers to JSON string for stable CSV output.
         if isinstance(row.get("triggers"), list):
-            row["triggers"] = json.dumps(row["triggers"])
+            row["triggers"] = _json_dumps(row["triggers"])
         writer.writerow(row)
 
     output.seek(0)

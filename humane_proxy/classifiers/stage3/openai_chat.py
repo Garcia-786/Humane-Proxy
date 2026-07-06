@@ -26,6 +26,7 @@ import logging
 import os
 
 
+from humane_proxy._json import loads as _json_loads
 from humane_proxy.classifiers.models import ClassificationResult
 from humane_proxy.classifiers.stage3.base import Stage3Classifier
 from humane_proxy.telemetry import traced_stage
@@ -114,7 +115,9 @@ class OpenAIChatClassifier(Stage3Classifier):
     def _parse_response(self, content: str) -> ClassificationResult:
         """Parse the model's JSON response."""
         try:
-            data = json.loads(content)
+            # orjson's JSONDecodeError subclasses json's, so this handler
+            # covers both shim paths.
+            data = _json_loads(content)
         except json.JSONDecodeError:
             logger.warning("Stage-3 returned non-JSON: %s", content[:200])
             return ClassificationResult(

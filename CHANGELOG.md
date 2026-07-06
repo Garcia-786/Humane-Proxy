@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **orjson JSON fast path** — a new optional `perf` extra installs
+  `orjson` (Rust-backed JSON); when present, the proxy serializes every
+  `/chat` response through `ORJSONResponse`, and storage trigger
+  serialization, Stage-3 LLM response parsing, and integration tool
+  output all route through an internal shim (`humane_proxy._json`).
+  Without the extra, everything falls back to the stdlib `json` module
+  with identical behavior.
+
+---
+
 ## [0.5.7] - 2026-07-06
 
 ### Added
