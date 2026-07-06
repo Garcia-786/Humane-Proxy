@@ -21,22 +21,19 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Emoji & pictograph ranges: Misc Symbols/Dingbats, Emoticons, Transport,
-# Supplemental Symbols, regional indicators (flags), Misc Technical,
-# arrows-supplement blocks, variation selector 16, and common singletons.
-# Written with escapes so this file itself stays emoji-free.
+# Supplemental Symbols, Misc Technical, arrows-supplement blocks,
+# variation selector 16, and common singletons. Ranges must not overlap
+# (each block listed exactly once). Written with escapes so this file
+# itself stays emoji-free.
 _EMOJI_RE = re.compile(
     "["
-    "\U0001F000-\U0001FAFF"   # emoticons, symbols, transport, supplemental
-    "\U00002600-\U000027BF"   # misc symbols + dingbats
-    "\U0001F1E6-\U0001F1FF"   # regional indicators (flag pairs)
+    "\U0001F000-\U0001FAFF"   # emoticons, symbols, transport, flags, supplemental
+    "\U00002600-\U000027BF"   # misc symbols + dingbats (incl. check/cross marks)
     "\U00002B00-\U00002BFF"   # misc symbols and arrows (stars etc.)
     "\U00002300-\U000023FF"   # misc technical (watch, hourglass etc.)
     "\U0000FE0F"              # variation selector-16 (emoji presentation)
     "\U00002139"              # information source
     "\U0000203C\U00002049"    # double/interrobang exclamation
-    "\U00002705\U0000274C"    # check mark / cross mark
-    "\U00002757\U00002753"    # exclamation / question ornaments
-    "\U00002B50"              # star
     "]"
 )
 

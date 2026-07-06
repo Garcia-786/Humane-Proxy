@@ -114,8 +114,7 @@ class TestUrlSanitization:
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "SECRETTOKEN" not in joined
         assert "SECRETBODY" not in joined
-        assert "hooks.slack.com" in joined
-        assert "400" in joined
+        assert "Webhook https://hooks.slack.com returned HTTP 400" in joined
 
     async def test_exception_logs_never_contain_token(self, caplog):
         import logging
@@ -130,4 +129,4 @@ class TestUrlSanitization:
 
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "SECRETTOKEN" not in joined
-        assert "discord.com" in joined
+        assert "Webhook dispatch to https://discord.com failed" in joined

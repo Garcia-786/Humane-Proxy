@@ -219,10 +219,12 @@ async def chat(request: Request) -> JSONResponse:
         return JSONResponse(status_code=llm_response.status_code, content=body)
 
     except httpx.RequestError as exc:
+        # Exception text can carry the upstream URL and internal network
+        # details — keep it in server logs, return a generic message.
+        logger.warning(
+            "Upstream LLM request failed: %s: %s", type(exc).__name__, exc
+        )
         return JSONResponse(
             status_code=503,
-            content={
-                "status": "error",
-                "message": f"Upstream LLM unavailable: {type(exc).__name__}: {exc}",
-            },
+            content={"status": "error", "message": "Upstream LLM unavailable."},
         )

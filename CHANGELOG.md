@@ -6,6 +6,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.7] - 2026-07-06
+
+### Added
+
+- Brand assets: `docs/assets/banner.png` (README header) and
+  `docs/assets/logo.png` (canonical logo, also used by the dashboard
+  templates). Referenced via raw GitHub URLs so PyPI and Glama render them.
+
+### Security
+
+- Upstream LLM connection failures no longer echo exception details
+  (which can include internal URLs and network information) to proxy
+  clients — details go to server logs; clients get a generic 503 message
+  (CodeQL #2).
+- The tests workflow's `GITHUB_TOKEN` is now restricted to
+  `contents: read` (CodeQL #6).
+
+### Fixed
+
+- Webhook log-sanitization tests assert the exact sanitized log line
+  instead of a bare domain substring (CodeQL #14, #15).
+- The no-emoji scan's character class no longer contains overlapping
+  ranges (CodeQL #16).
+
+### Removed
+
+- `dashboard/public/logo.png` — superseded by `docs/assets/logo.png`.
+
+---
+
 ## [0.5.6] - 2026-07-06
 
 ### Changed
