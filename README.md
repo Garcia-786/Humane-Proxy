@@ -1,4 +1,6 @@
-# HumaneProxy
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Vishisht16/Humane-Proxy/main/docs/assets/banner.png" alt="HumaneProxy" width="100%">
+</p>
 
 <!-- mcp-name: io.github.Vishisht16/humane-proxy -->
 
