@@ -4,11 +4,72 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
+from collections import deque
 
 from humane_proxy.config import get_config
 from humane_proxy.escalation.local_db import check_rate_limit, log_escalation
 
 logger = logging.getLogger("humane_proxy.escalation")
+
+# ---------------------------------------------------------------------------
+# Global alert-rate backstop
+# ---------------------------------------------------------------------------
+# The per-session limiter in `check_rate_limit()` is keyed entirely on
+# `session_id`, which is caller-supplied and unauthenticated (see
+# middleware/interceptor.py — it's read straight off the request body with
+# no validation). That means the per-session quota can be trivially
+# defeated by rotating `session_id` on every request: each "new" session
+# gets its own fresh quota, so an attacker can trigger unlimited operator
+# alerts (Slack/Discord/Teams/PagerDuty/email) even though each individual
+# session never exceeds its own limit.
+#
+# This backstop counts alerts *regardless of session_id*, so rotating the
+# ID cannot bypass it. It's a ceiling on top of the existing per-session
+# limiter, not a replacement for it — both still apply.
+#
+# In-process only (a sliding window over a deque of timestamps, guarded by
+# a lock). For multi-process/multi-worker deployments this ceiling is
+# per-process, not global across the fleet; a shared backend (Redis) would
+# be needed for a hard global cap there. Tracked as a possible follow-up —
+# this still closes the single-process bypass, which is the exploitable
+# case for the default (non-Redis) deployment most users run.
+_global_alert_lock = threading.Lock()
+_global_alert_timestamps: deque[float] = deque()
+
+
+def _reset_global_rate_limit() -> None:
+    """Clear in-process global-limiter state. Test-only helper."""
+    with _global_alert_lock:
+        _global_alert_timestamps.clear()
+
+
+def _global_rate_limit_allows() -> bool:
+    """Return True if firing another alert stays within the global ceiling.
+
+    Config keys (under ``escalation:``):
+      - ``global_rate_limit_max`` (default 100)
+      - ``global_rate_limit_window_seconds`` (default 60)
+
+    Set ``global_rate_limit_max`` to ``0`` to disable this backstop.
+    """
+    cfg = get_config()
+    esc_cfg = cfg.get("escalation", {}) or {}
+    max_alerts = esc_cfg.get("global_rate_limit_max", 100)
+    window_s = esc_cfg.get("global_rate_limit_window_seconds", 60)
+
+    if not max_alerts or max_alerts <= 0:
+        return True  # backstop disabled
+
+    now = time.monotonic()
+    with _global_alert_lock:
+        while _global_alert_timestamps and now - _global_alert_timestamps[0] > window_s:
+            _global_alert_timestamps.popleft()
+        if len(_global_alert_timestamps) >= max_alerts:
+            return False
+        _global_alert_timestamps.append(now)
+        return True
 
 # ---------------------------------------------------------------------------
 # International crisis resource database
@@ -196,7 +257,14 @@ def escalate(
 
     # --- Alert rate-limit check (before logging so the quota is counted
     # against events already persisted in the window) ---
-    alerts_allowed = check_rate_limit(session_id)
+    # Two independent checks:
+    #   1. Per-session quota (existing) — defeated by rotating session_id.
+    #   2. Global backstop (new) — cannot be defeated that way, since it
+    #      doesn't key off session_id at all. Short-circuits so a session
+    #      that's already over its own quota never consumes a global slot.
+    session_limit_ok = check_rate_limit(session_id)
+    global_limit_ok = _global_rate_limit_allows() if session_limit_ok else True
+    alerts_allowed = session_limit_ok and global_limit_ok
 
     # --- Persist — always, with failure protection.  Rate limiting only
     # applies to operator alerts; suppressing audit records would blind
@@ -221,15 +289,21 @@ def escalate(
         }
 
     if not alerts_allowed:
+        reason = (
+            "logged_alerts_rate_limited"
+            if not session_limit_ok
+            else "logged_alerts_globally_rate_limited"
+        )
+        limit_label = "per-session" if not session_limit_ok else "GLOBAL"
         logger.warning(
-            "[RATE-LIMITED] session=%s  category=%s  risk_score=%.2f — "
+            "[RATE-LIMITED:%s] session=%s  category=%s  risk_score=%.2f — "
             "event logged, alerts suppressed (quota exhausted)",
-            session_id, category, risk_score,
+            limit_label, session_id, category, risk_score,
         )
         return {
             "escalated": True,
             "alerted": False,
-            "reason": "logged_alerts_rate_limited",
+            "reason": reason,
             "session_id": session_id,
             "category": category,
             "risk_score": risk_score,
