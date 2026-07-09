@@ -312,6 +312,14 @@ escalation:
   rate_limit_max: 3
   rate_limit_window_hours: 1
 
+  # Global ALERT rate-limit backstop, independent of session_id.
+  # session_id is caller-supplied and unauthenticated, so the per-session
+  # quota above can be bypassed by rotating session_id on every request.
+  # This ceiling counts alerts across ALL sessions and cannot be bypassed
+  # that way. Set global_rate_limit_max to 0 to disable it.
+  global_rate_limit_max: 100
+  global_rate_limit_window_seconds: 60
+
   webhooks:
     slack_url: ""
     discord_url: ""
@@ -331,4 +339,3 @@ escalation:
       from: ""
       # List of recipient addresses
       to: []
-
