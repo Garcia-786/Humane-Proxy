@@ -60,6 +60,105 @@ class TestRateLimiting:
             mock_fire.assert_not_called()
 
 
+class TestGlobalRateLimitBackstop:
+    """Regression: rotating session_id must NOT bypass alert rate limiting.
+
+    Previously, check_rate_limit() was keyed only on session_id, which is
+    caller-supplied and unauthenticated (interceptor.py reads it straight
+    off the request body with no validation). An attacker could send a
+    fresh session_id on every request and get unlimited operator alerts.
+    """
+
+    def _cfg(self, global_max: int, window_s: int = 60):
+        return {
+            "escalation": {
+                "global_rate_limit_max": global_max,
+                "global_rate_limit_window_seconds": window_s,
+                "webhooks": {},
+            }
+        }
+
+    def setup_method(self):
+        from humane_proxy.escalation.router import _reset_global_rate_limit
+        _reset_global_rate_limit()
+
+    def teardown_method(self):
+        from humane_proxy.escalation.router import _reset_global_rate_limit
+        _reset_global_rate_limit()
+
+    def test_rotating_session_id_no_longer_bypasses_rate_limit(self):
+        from humane_proxy.escalation import router as router_mod
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(global_max=5)):
+            results = [
+                escalate(f"attacker-session-{i}", 0.95, ["t"], "self_harm")
+                for i in range(20)
+            ]
+
+        alerted = [r for r in results if r["alerted"]]
+        suppressed = [r for r in results if not r["alerted"]]
+        # Every request used a brand-new session_id (own fresh per-session
+        # quota each time), yet the global ceiling still caps total alerts.
+        assert len(alerted) == 5
+        assert len(suppressed) == 15
+        assert all(r["reason"] == "logged_alerts_globally_rate_limited" for r in suppressed)
+        # Audit trail is still complete for every event, same guarantee as
+        # the existing per-session limiter.
+        assert all(r["escalated"] is True for r in results)
+
+    def test_global_limit_disabled_when_zero(self):
+        from humane_proxy.escalation import router as router_mod
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(global_max=0)):
+            results = [
+                escalate(f"disabled-check-session-{i}", 0.95, ["t"], "self_harm")
+                for i in range(10)
+            ]
+        assert all(r["alerted"] is True for r in results)
+
+    def test_global_window_expires_and_allows_more(self):
+        from humane_proxy.escalation import router as router_mod
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(global_max=2, window_s=60)):
+            results = [
+                escalate(f"window-session-{i}", 0.95, ["t"], "self_harm")
+                for i in range(4)
+            ]
+        assert sum(1 for r in results if r["alerted"]) == 2
+
+        # Simulate the window elapsing by backdating recorded timestamps.
+        with router_mod._global_alert_lock:
+            router_mod._global_alert_timestamps.clear()
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(global_max=2, window_s=60)):
+            result = escalate("window-session-after-reset", 0.95, ["t"], "self_harm")
+        assert result["alerted"] is True
+
+    def test_session_limited_event_does_not_consume_global_slot(self):
+        """A request already blocked by its own session quota shouldn't
+        also burn a global-quota slot — it was never going to alert."""
+        from humane_proxy.escalation import router as router_mod
+        from humane_proxy.storage.factory import get_store
+
+        # The per-session cap lives on the already-instantiated storage
+        # singleton (set once from real config at process start) — read
+        # the live value rather than assuming one.
+        session_cap = get_store()._rate_limit_max
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(global_max=5)):
+            sid = "same-session-repeated"
+            for _ in range(session_cap):
+                escalate(sid, 0.95, ["t"], "self_harm")  # burn its own session quota
+            for _ in range(10):
+                result = escalate(sid, 0.95, ["t"], "self_harm")
+                assert result["reason"] == "logged_alerts_rate_limited"
+
+            # Global quota (5) should be untouched by the 10 session-limited
+            # calls above — a fresh session can still alert.
+            fresh = escalate("fresh-session", 0.95, ["t"], "self_harm")
+            assert fresh["alerted"] is True
+
+
 class TestDbFailure:
     def test_db_failure_graceful(self):
         with patch(
