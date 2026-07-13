@@ -95,11 +95,20 @@ app = FastAPI(
 )
 
 
+def _client_ip(request: Request) -> str:
+    """Return the raw TCP peer address for this connection.
+
+    Intentionally does NOT trust X-Forwarded-For / X-Real-IP headers — those
+    are attacker-controlled unless a trusted reverse proxy is guaranteed to
+    overwrite them, which this app doesn't assume. ``request.client.host``
+    is the actual TCP peer and can't be spoofed via request headers/body.
+    """
+    return request.client.host if request.client else "unknown"
+
+
 def _resolve_session_id(payload: dict[str, Any], request: Request) -> str:
     """Return the session_id from the payload, falling back to the client IP."""
-    return payload.get("session_id") or (
-        request.client.host if request.client else "unknown"
-    )
+    return payload.get("session_id") or _client_ip(request)
 
 
 def _extract_last_user_message(payload: dict[str, Any]) -> str:
@@ -167,6 +176,7 @@ async def chat(request: Request) -> JSONResponse:
             message_hash=result.message_hash,
             stage_reached=cls.stage,
             reasoning=cls.reasoning,
+            client_ip=_client_ip(request),
         )
 
         # Self-harm: return care response instead of generic flagged message.
@@ -248,4 +258,4 @@ async def chat(request: Request) -> JSONResponse:
         return _Response(
             status_code=503,
             content={"status": "error", "message": "Upstream LLM unavailable."},
-        )
+        )
