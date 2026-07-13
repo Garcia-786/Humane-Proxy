@@ -2,7 +2,25 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from humane_proxy.escalation.router import escalate
+
+
+@pytest.fixture(autouse=True)
+def _reset_alert_backstops():
+    """Isolate the in-process IP/global limiter state between tests.
+
+    Both live as module-level counters in router.py, so without this,
+    tests that don't pass client_ip share a single "unknown" IP bucket and
+    can bleed into each other's quotas depending on run order.
+    """
+    from humane_proxy.escalation.router import _reset_global_rate_limit, _reset_ip_rate_limit
+    _reset_global_rate_limit()
+    _reset_ip_rate_limit()
+    yield
+    _reset_global_rate_limit()
+    _reset_ip_rate_limit()
 
 
 class TestEscalation:
@@ -61,30 +79,27 @@ class TestRateLimiting:
 
 
 class TestGlobalRateLimitBackstop:
-    """Regression: rotating session_id must NOT bypass alert rate limiting.
+    """Regression: rotating session_id (AND client_ip) must not bypass
+    alert rate limiting entirely — the global outer ceiling still caps it.
 
     Previously, check_rate_limit() was keyed only on session_id, which is
     caller-supplied and unauthenticated (interceptor.py reads it straight
     off the request body with no validation). An attacker could send a
     fresh session_id on every request and get unlimited operator alerts.
+
+    ip_rate_limit_max is disabled (0) in these tests to isolate the global
+    layer specifically — see TestIpRateLimitBackstop for that layer.
     """
 
     def _cfg(self, global_max: int, window_s: int = 60):
         return {
             "escalation": {
+                "ip_rate_limit_max": 0,
                 "global_rate_limit_max": global_max,
                 "global_rate_limit_window_seconds": window_s,
                 "webhooks": {},
             }
         }
-
-    def setup_method(self):
-        from humane_proxy.escalation.router import _reset_global_rate_limit
-        _reset_global_rate_limit()
-
-    def teardown_method(self):
-        from humane_proxy.escalation.router import _reset_global_rate_limit
-        _reset_global_rate_limit()
 
     def test_rotating_session_id_no_longer_bypasses_rate_limit(self):
         from humane_proxy.escalation import router as router_mod
@@ -156,6 +171,119 @@ class TestGlobalRateLimitBackstop:
             # Global quota (5) should be untouched by the 10 session-limited
             # calls above — a fresh session can still alert.
             fresh = escalate("fresh-session", 0.95, ["t"], "self_harm")
+            assert fresh["alerted"] is True
+
+
+class TestIpRateLimitBackstop:
+    """The per-IP layer: keyed on client_ip, checked on every request.
+
+    This is the layer that actually neutralizes session_id rotation from a
+    single network origin — the global ceiling (above) is the last-resort
+    catch-all for a *distributed* attacker with many real IPs.
+
+    global_rate_limit_max is set generously high in these tests to isolate
+    the IP layer specifically.
+    """
+
+    def _cfg(self, ip_max: int, window_s: int = 60):
+        return {
+            "escalation": {
+                "ip_rate_limit_max": ip_max,
+                "ip_rate_limit_window_seconds": window_s,
+                "global_rate_limit_max": 10_000,
+                "webhooks": {},
+            }
+        }
+
+    def test_rotating_session_id_same_ip_still_capped(self):
+        """Same attacker IP, fresh session_id every request — the per-IP
+        layer catches what the per-session limiter alone would miss."""
+        from humane_proxy.escalation import router as router_mod
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(ip_max=4)):
+            results = [
+                escalate(
+                    f"attacker-session-{i}", 0.95, ["t"], "self_harm",
+                    client_ip="203.0.113.7",
+                )
+                for i in range(10)
+            ]
+
+        alerted = [r for r in results if r["alerted"]]
+        suppressed = [r for r in results if not r["alerted"]]
+        assert len(alerted) == 4
+        assert len(suppressed) == 6
+        assert all(r["reason"] == "logged_alerts_ip_rate_limited" for r in suppressed)
+        assert all(r["escalated"] is True for r in results)  # audit trail intact
+
+    def test_different_ips_each_get_their_own_quota(self):
+        """Two distinct real IPs each get their own fresh per-IP quota —
+        expected/legitimate behavior; the global ceiling is the backstop
+        for the distributed case, not this layer."""
+        from humane_proxy.escalation import router as router_mod
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(ip_max=2)):
+            results_a = [
+                escalate(f"sess-a-{i}", 0.95, ["t"], "self_harm", client_ip="203.0.113.7")
+                for i in range(2)
+            ]
+            results_b = [
+                escalate(f"sess-b-{i}", 0.95, ["t"], "self_harm", client_ip="198.51.100.42")
+                for i in range(2)
+            ]
+        assert all(r["alerted"] for r in results_a)
+        assert all(r["alerted"] for r in results_b)
+
+    def test_ip_limit_disabled_when_zero(self):
+        from humane_proxy.escalation import router as router_mod
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(ip_max=0)):
+            results = [
+                escalate(
+                    f"disabled-check-{i}", 0.95, ["t"], "self_harm",
+                    client_ip="203.0.113.7",
+                )
+                for i in range(15)
+            ]
+        assert all(r["alerted"] is True for r in results)
+
+    def test_missing_client_ip_falls_back_to_shared_unknown_bucket(self):
+        """Backward compatibility: callers that don't pass client_ip (e.g.
+        any external caller of escalate() written before this change)
+        still work, sharing one 'unknown' bucket rather than crashing."""
+        from humane_proxy.escalation import router as router_mod
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(ip_max=3)):
+            results = [
+                escalate(f"no-ip-sess-{i}", 0.95, ["t"], "self_harm")
+                for i in range(5)
+            ]
+        assert sum(1 for r in results if r["alerted"]) == 3
+
+    def test_session_limited_event_does_not_consume_ip_slot(self):
+        """Mirrors the equivalent global-layer test: a request already
+        blocked by its own session quota shouldn't burn an IP-quota slot."""
+        from humane_proxy.escalation import router as router_mod
+        from humane_proxy.storage.factory import get_store
+
+        session_cap = get_store()._rate_limit_max
+        ip = "203.0.113.7"
+        # IP quota must have headroom beyond session_cap, or burning the
+        # session's own quota (below) would itself exhaust the IP bucket
+        # and confound the thing this test is isolating.
+        ip_max = session_cap + 5
+
+        with patch.object(router_mod, "get_config", return_value=self._cfg(ip_max=ip_max)):
+            sid = "same-session-repeated-ip-test"
+            for _ in range(session_cap):
+                escalate(sid, 0.95, ["t"], "self_harm", client_ip=ip)
+            for _ in range(10):
+                result = escalate(sid, 0.95, ["t"], "self_harm", client_ip=ip)
+                assert result["reason"] == "logged_alerts_rate_limited"
+
+            # IP quota should be untouched by the 10 session-limited calls
+            # above — a fresh session from the same IP can still alert.
+            fresh = escalate("fresh-session-ip-test", 0.95, ["t"], "self_harm", client_ip=ip)
             assert fresh["alerted"] is True
 
 
