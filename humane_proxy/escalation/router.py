@@ -4,11 +4,131 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
+from collections import deque
 
 from humane_proxy.config import get_config
 from humane_proxy.escalation.local_db import check_rate_limit, log_escalation
 
 logger = logging.getLogger("humane_proxy.escalation")
+
+# ---------------------------------------------------------------------------
+# Alert-rate backstops: per-IP layer + global outer ceiling
+# ---------------------------------------------------------------------------
+# The per-session limiter in `check_rate_limit()` is keyed entirely on
+# `session_id`, which is caller-supplied and unauthenticated (see
+# middleware/interceptor.py — it's read straight off the request body with
+# no validation). That means the per-session quota can be trivially
+# defeated by rotating `session_id` on every request: each "new" session
+# gets its own fresh quota, so an attacker can trigger unlimited operator
+# alerts (Slack/Discord/Teams/PagerDuty/email) even though each individual
+# session never exceeds its own limit.
+#
+# Two backstops sit on top of the per-session check, evaluated in order:
+#
+#   1. Per-IP layer (checked on every request). Keyed on `request.client.host`
+#      — the raw TCP peer address, NOT any caller-supplied header (X-Forwarded-For
+#      etc. are trivially spoofable and are intentionally not trusted here).
+#      Rotating session_id doesn't help an attacker anymore, since a single
+#      real network origin still has one IP-scoped quota.
+#
+#   2. Global outer ceiling (last line of defense). Keyed on nothing —
+#      counts every alert regardless of session_id or IP. Catches the
+#      distributed case (many real IPs, e.g. a botnet) where the per-IP
+#      layer alone wouldn't help, at the cost of being a blunt, shared cap.
+#
+# Both are in-process (sliding window over a deque of timestamps, guarded
+# by a lock). For multi-process/multi-worker deployments each is per-process,
+# not shared across the fleet; a Redis-backed version would be needed for a
+# hard cap there. Tracked as a possible follow-up — this still closes the
+# single-process bypass, which is the exploitable case for the default
+# (non-Redis) deployment most users run.
+
+_MAX_TRACKED_IPS = 10_000  # bound memory: cap distinct IP buckets tracked
+
+_global_alert_lock = threading.Lock()
+_global_alert_timestamps: deque[float] = deque()
+
+_ip_alert_lock = threading.Lock()
+_ip_alert_timestamps: dict[str, deque[float]] = {}
+
+
+def _reset_global_rate_limit() -> None:
+    """Clear in-process global-limiter state. Test-only helper."""
+    with _global_alert_lock:
+        _global_alert_timestamps.clear()
+
+
+def _reset_ip_rate_limit() -> None:
+    """Clear in-process IP-limiter state. Test-only helper."""
+    with _ip_alert_lock:
+        _ip_alert_timestamps.clear()
+
+
+def _ip_rate_limit_allows(client_ip: str | None) -> bool:
+    """Return True if firing another alert stays within this IP's quota.
+
+    Config keys (under ``escalation:``):
+      - ``ip_rate_limit_max`` (default 10)
+      - ``ip_rate_limit_window_seconds`` (default 60)
+
+    Set ``ip_rate_limit_max`` to ``0`` to disable this layer.
+    """
+    cfg = get_config()
+    esc_cfg = cfg.get("escalation", {}) or {}
+    max_alerts = esc_cfg.get("ip_rate_limit_max", 10)
+    window_s = esc_cfg.get("ip_rate_limit_window_seconds", 60)
+
+    if not max_alerts or max_alerts <= 0:
+        return True  # layer disabled
+
+    client_ip = client_ip or "unknown"
+    now = time.monotonic()
+    with _ip_alert_lock:
+        bucket = _ip_alert_timestamps.get(client_ip)
+        if bucket is None:
+            if len(_ip_alert_timestamps) >= _MAX_TRACKED_IPS:
+                # Bound memory under sustained traffic from many distinct
+                # IPs: evict the oldest-inserted bucket to make room.
+                _ip_alert_timestamps.pop(next(iter(_ip_alert_timestamps)))
+            bucket = deque()
+            _ip_alert_timestamps[client_ip] = bucket
+
+        while bucket and now - bucket[0] > window_s:
+            bucket.popleft()
+        if len(bucket) >= max_alerts:
+            return False
+        bucket.append(now)
+        return True
+
+
+def _global_rate_limit_allows() -> bool:
+    """Return True if firing another alert stays within the global ceiling.
+
+    Config keys (under ``escalation:``):
+      - ``global_rate_limit_max`` (default 100)
+      - ``global_rate_limit_window_seconds`` (default 60)
+
+    Set ``global_rate_limit_max`` to ``0`` to disable this backstop.
+    """
+    cfg = get_config()
+    esc_cfg = cfg.get("escalation", {}) or {}
+    max_alerts = esc_cfg.get("global_rate_limit_max", 100)
+    window_s = esc_cfg.get("global_rate_limit_window_seconds", 60)
+
+    if not max_alerts or max_alerts <= 0:
+        return True  # backstop disabled
+
+    now = time.monotonic()
+    with _global_alert_lock:
+        while _global_alert_timestamps and now - _global_alert_timestamps[0] > window_s:
+            _global_alert_timestamps.popleft()
+        if len(_global_alert_timestamps) >= max_alerts:
+            return False
+        _global_alert_timestamps.append(now)
+        return True
+
 
 # ---------------------------------------------------------------------------
 # International crisis resource database
@@ -156,6 +276,7 @@ def escalate(
     message_hash: str | None = None,
     stage_reached: int = 1,
     reasoning: str | None = None,
+    client_ip: str | None = None,
 ) -> dict:
     """Handle a flagged interaction.
 
@@ -163,7 +284,8 @@ def escalate(
     ----
     1. Persist the event to the audit log — always.  The audit trail must
        be complete; only *alerting* is rate limited.
-    2. Check the per-session alert rate limit.
+    2. Check the per-session alert rate limit, then the per-IP layer, then
+       the global outer ceiling.
     3. If within quota → emit a CRITICAL log and fire webhooks.
     4. Return a result dict indicating the outcome (``alerted`` says
        whether operator notifications went out).
@@ -184,6 +306,11 @@ def escalate(
         Which pipeline stage (1, 2, or 3) produced the final result.
     reasoning:
         Stage-3 reasoning string (if available).
+    client_ip:
+        Raw TCP peer address of the caller (``request.client.host``), used
+        to key the per-IP alert-rate backstop. Optional for backward
+        compatibility with existing callers; falls back to a shared
+        ``"unknown"`` bucket when omitted.
 
     Returns
     -------
@@ -196,7 +323,20 @@ def escalate(
 
     # --- Alert rate-limit check (before logging so the quota is counted
     # against events already persisted in the window) ---
-    alerts_allowed = check_rate_limit(session_id)
+    # Three independent, ordered checks — each only runs if the previous
+    # one passed, so a request already blocked by an earlier layer never
+    # consumes quota from a later one:
+    #   1. Per-session quota (existing) — defeated by rotating session_id.
+    #   2. Per-IP layer (new) — keyed on the real TCP peer address, so
+    #      rotating session_id alone can no longer bypass rate limiting.
+    #   3. Global outer ceiling (existing) — catches the distributed case
+    #      (many real IPs) that the per-IP layer alone can't stop.
+    session_limit_ok = check_rate_limit(session_id)
+    ip_limit_ok = _ip_rate_limit_allows(client_ip) if session_limit_ok else True
+    global_limit_ok = (
+        _global_rate_limit_allows() if (session_limit_ok and ip_limit_ok) else True
+    )
+    alerts_allowed = session_limit_ok and ip_limit_ok and global_limit_ok
 
     # --- Persist — always, with failure protection.  Rate limiting only
     # applies to operator alerts; suppressing audit records would blind
@@ -221,15 +361,24 @@ def escalate(
         }
 
     if not alerts_allowed:
+        if not session_limit_ok:
+            reason = "logged_alerts_rate_limited"
+            limit_label = "session"
+        elif not ip_limit_ok:
+            reason = "logged_alerts_ip_rate_limited"
+            limit_label = "ip"
+        else:
+            reason = "logged_alerts_globally_rate_limited"
+            limit_label = "GLOBAL"
         logger.warning(
-            "[RATE-LIMITED] session=%s  category=%s  risk_score=%.2f — "
+            "[RATE-LIMITED:%s] session=%s  client_ip=%s  category=%s  risk_score=%.2f — "
             "event logged, alerts suppressed (quota exhausted)",
-            session_id, category, risk_score,
+            limit_label, session_id, client_ip or "unknown", category, risk_score,
         )
         return {
             "escalated": True,
             "alerted": False,
-            "reason": "logged_alerts_rate_limited",
+            "reason": reason,
             "session_id": session_id,
             "category": category,
             "risk_score": risk_score,

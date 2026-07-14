@@ -312,6 +312,22 @@ escalation:
   rate_limit_max: 3
   rate_limit_window_hours: 1
 
+  # Per-IP ALERT rate-limit layer, checked on every request. session_id is
+  # caller-supplied and unauthenticated, so the per-session quota above can
+  # be bypassed by rotating session_id on every request. This layer is
+  # keyed on the real TCP peer address instead (not attacker-controlled),
+  # so rotating session_id no longer helps. Set ip_rate_limit_max to 0 to
+  # disable it.
+  ip_rate_limit_max: 10
+  ip_rate_limit_window_seconds: 60
+
+  # Global ALERT rate-limit — outer ceiling, last line of defense. Keyed on
+  # nothing (counts every alert regardless of session_id or IP), so it also
+  # catches the distributed case (many real IPs) the per-IP layer alone
+  # can't stop. Set global_rate_limit_max to 0 to disable it.
+  global_rate_limit_max: 100
+  global_rate_limit_window_seconds: 60
+
   webhooks:
     slack_url: ""
     discord_url: ""
@@ -331,4 +347,3 @@ escalation:
       from: ""
       # List of recipient addresses
       to: []
-
