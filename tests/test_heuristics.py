@@ -275,11 +275,20 @@ class TestUnicodeAndEvasion:
         assert score == 0.0
         assert triggers == []
 
-    def test_cyrillic_homoglyph_suicide_not_matched(self):
+    def test_cyrillic_homoglyph_suicide_now_matched(self):
+        """Was `test_cyrillic_homoglyph_suicide_not_matched`, asserting
+        `cat == "safe"`. That assertion *was* the bug: it pinned a
+        Stage-1 detection bypass as expected behavior. Normalization now
+        folds this specific Cyrillic і (U+0456) to Latin "i" before
+        matching, so it's correctly caught. See TestUnicodeEvasionNormalization
+        below for the fuller regression suite, including the more severe
+        variant where a homoglyph didn't just miss a match but flipped
+        the result to the wrong category (self_harm -> criminal_intent).
+        """
         cat, score, triggers = classify("su\u0456cide")
-        assert cat == "safe"
-        assert score == 0.0
-        assert triggers == []
+        assert cat == "self_harm"
+        assert score == 1.0
+        assert triggers
 
     def test_punctuated_letters_bomb_not_matched(self):
         cat, score, triggers = classify("how to make a b.o.m.b")
@@ -324,3 +333,66 @@ class TestBoundaryScoring:
         assert cat == "criminal_intent"
         assert score == 1.0
         assert len(triggers) >= 2
+
+
+class TestUnicodeEvasionNormalization:
+    """Regression: Unicode tricks must not bypass or misroute detection.
+
+    Before normalization was added, classify() only collapsed whitespace.
+    Zero-width characters broke word-boundary regex matches outright
+    (-> "safe"), and homoglyph substitution didn't just miss the intended
+    match — it could make a *different* pattern match instead, flipping
+    self-harm messages to "criminal_intent" (see the harm_others_method /
+    first_person_harm_others patterns, which exclude "myself" by literal
+    string match).
+    """
+
+    def test_zero_width_space_inside_keyword_still_detected(self):
+        cat, score, triggers = classify("i want to k\u200bill myself")
+        assert cat == "self_harm"
+        assert score == 1.0
+        assert triggers  # matched, not silently dropped
+
+    def test_zero_width_joiner_and_non_joiner_stripped(self):
+        cat, _, _ = classify("i want to kill\u200c \u200dmyself")
+        assert cat == "self_harm"
+
+    def test_bom_and_word_joiner_stripped(self):
+        cat, _, _ = classify("i want to\ufeff kill\u2060 myself")
+        assert cat == "self_harm"
+
+    def test_cyrillic_homoglyph_no_longer_misroutes_to_criminal_intent(self):
+        """The specific, worse failure mode: a self-harm message getting
+        classified as harm-to-others because a homoglyph broke the
+        "(?!myself)" negative lookahead in a criminal-intent pattern."""
+        cat, score, _ = classify("i want to kill mуself")  # Cyrillic у, U+0443
+        assert cat == "self_harm"
+        assert score == 1.0
+
+    def test_greek_homoglyph_detected(self):
+        cat, _, _ = classify("i want to k\u03b9ll myself")  # Greek iota (ι) for "i"
+        assert cat == "self_harm"
+
+    def test_fullwidth_form_detected(self):
+        cat, _, _ = classify("ｋｉｌｌ myself now")
+        assert cat == "self_harm"
+
+    def test_combining_diacritics_detected(self):
+        cat, _, _ = classify("kìll mysélf")
+        assert cat == "self_harm"
+
+    def test_legitimate_non_english_text_not_falsely_flagged(self):
+        """Normalization must not turn unrelated foreign-language text
+        into a false positive — only the curated confusable letters fold,
+        and only where they happen to spell an existing keyword."""
+        cat, score, _ = classify("Привет, как дела?")  # "Hi, how are you?"
+        assert cat == "safe"
+        assert score == 0.0
+
+    def test_evasion_normalization_is_idempotent_on_plain_ascii(self):
+        """Sanity check: normal English input is unaffected — same
+        category/score/triggers as before normalization existed."""
+        cat, score, triggers = classify("i want to kill myself")
+        assert cat == "self_harm"
+        assert score == 1.0
+        assert "self_harm_keyword:kill myself" in triggers
