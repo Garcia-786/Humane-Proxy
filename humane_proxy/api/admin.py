@@ -42,6 +42,28 @@ _security = HTTPBearer(auto_error=False)
 
 _start_time = time.monotonic()
 
+# Characters that, as the first character of a CSV cell, cause Excel /
+# Google Sheets / LibreOffice to interpret the cell as a formula (or, for
+# tab/CR, as a DDE payload) instead of literal text — CWE-1236 "CSV
+# Injection". `session_id` reaches this export unsanitized and unvalidated
+# from the /chat request body (see middleware/interceptor.py), so an
+# attacker fully controls it; other exported fields are lower-risk but are
+# sanitized too as defense-in-depth.
+_CSV_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: Any) -> Any:
+    """Neutralize CSV/formula injection in a single exported field.
+
+    Prefixes the value with a leading single quote if it starts with a
+    formula-trigger character — the standard OWASP mitigation. Spreadsheet
+    apps then render the cell as literal text; the visible content is
+    otherwise unchanged for any normal, non-adversarial value.
+    """
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_TRIGGER_CHARS):
+        return "'" + value
+    return value
+
 
 # ---------------------------------------------------------------------------
 # Auth dependency
@@ -216,6 +238,8 @@ def export_escalations(
         # Normalize triggers to JSON string for stable CSV output.
         if isinstance(row.get("triggers"), list):
             row["triggers"] = _json_dumps(row["triggers"])
+        # Neutralize CSV/formula injection (CWE-1236) — see _csv_safe().
+        row = {key: _csv_safe(value) for key, value in row.items()}
         writer.writerow(row)
 
     output.seek(0)
