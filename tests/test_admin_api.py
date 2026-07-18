@@ -1,5 +1,7 @@
 """Tests for REST Admin API (GET/DELETE endpoints, auth, stats)."""
 
+import csv
+import io
 import json
 import time
 
@@ -189,3 +191,60 @@ class TestEmptyFilterParams:
         resp = client.get("/admin/escalations?category=&session_id=", headers=self.HEADERS)
         assert resp.status_code == 200
         assert resp.json()["total"] == 3
+
+
+class TestExportCSV:
+    """Regression: CSV Injection / Formula Injection (CWE-1236).
+
+    session_id reaches /admin/escalations/export unsanitized and
+    unvalidated — it's read straight off the /chat request body in
+    middleware/interceptor.py with no checks. Before this fix, it was
+    written directly into the CSV via csv.DictWriter with no escaping,
+    so an attacker-supplied session_id starting with '=', '+', '-', or
+    '@' would be interpreted as a formula by Excel/Sheets/LibreOffice
+    when an operator opened the export.
+    """
+
+    HEADERS = {"Authorization": "Bearer test-admin-secret"}
+
+    def test_formula_session_id_is_neutralized(self, _seeded_db):
+        malicious_sid = "=cmd|'/c calc'!A1"
+        _seeded_db.log(
+            malicious_sid, "self_harm", 0.95, ["t"], message_hash=None, stage_reached=1,
+        )
+
+        resp = client.get("/admin/escalations/export", headers=self.HEADERS)
+        assert resp.status_code == 200
+
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        matches = [r for r in rows if r["session_id"].lstrip("'") == malicious_sid]
+        assert matches, "seeded row missing from export"
+
+        exported_value = matches[0]["session_id"]
+        # Must NOT be the raw formula — must be neutralized with a
+        # leading single quote per the OWASP CSV Injection mitigation.
+        assert exported_value == "'" + malicious_sid
+        assert not exported_value.startswith("=")
+
+    @pytest.mark.parametrize("prefix", ["=", "+", "-", "@", "\t", "\r"])
+    def test_all_formula_trigger_prefixes_neutralized(self, _seeded_db, prefix):
+        sid = f"{prefix}malicious-session"
+        _seeded_db.log(sid, "self_harm", 0.9, ["t"], message_hash=None, stage_reached=1)
+
+        resp = client.get("/admin/escalations/export", headers=self.HEADERS)
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        matches = [r for r in rows if r["session_id"].lstrip("'") == sid]
+        assert matches, f"seeded row for prefix {prefix!r} missing from export"
+        assert matches[0]["session_id"].startswith("'")
+
+    def test_normal_session_id_unaffected(self, _seeded_db):
+        """Sanitization must not alter ordinary, non-adversarial values."""
+        resp = client.get("/admin/escalations/export", headers=self.HEADERS)
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        session_ids = {r["session_id"] for r in rows}
+        assert "sess-1" in session_ids
+        assert "sess-2" in session_ids
+
+    def test_export_requires_auth(self, _seeded_db):
+        resp = client.get("/admin/escalations/export")
+        assert resp.status_code == 401
