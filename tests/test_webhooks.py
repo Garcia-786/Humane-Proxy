@@ -9,6 +9,7 @@ from humane_proxy.escalation.webhooks import (
     send_discord,
     send_pagerduty,
     send_slack,
+    send_teams,
 )
 
 
@@ -130,3 +131,80 @@ class TestUrlSanitization:
         joined = " ".join(r.getMessage() for r in caplog.records)
         assert "SECRETTOKEN" not in joined
         assert "Webhook dispatch to https://discord.com failed" in joined
+
+
+@pytest.mark.asyncio
+class TestNotificationInjection:
+    """Regression: session_id is attacker-controlled (unauthenticated,
+    read straight off the /chat request body — see
+    middleware/interceptor.py) and must not be able to inject markdown
+    links, channel-wide mentions, or break out of the backtick code span
+    it's wrapped in, in any of the chat-based webhook payloads.
+    """
+
+    MALICIOUS_LINK = "[Click here for help](https://evil.example/phish)"
+    MENTION_PAYLOAD = "@everyone urgent <!channel> <@12345>"
+    BACKTICK_BREAKOUT = "innocent`*BREAKOUT* <!channel>"
+
+    async def test_slack_link_syntax_neutralized(self):
+        with patch("humane_proxy.escalation.webhooks._post", new_callable=AsyncMock) as mock:
+            await send_slack("https://hooks.slack.com/test", self.MALICIOUS_LINK, 0.9, ["t"], "self_harm")
+            payload = mock.call_args[0][1]
+            session_field = payload["blocks"][1]["fields"][0]["text"]
+        assert "[Click here for help](https://evil.example/phish)" not in session_field
+        assert "[" not in session_field and "]" not in session_field
+        assert "［" in session_field and "］" in session_field  # fullwidth substitutes present
+
+    async def test_slack_mention_syntax_neutralized(self):
+        with patch("humane_proxy.escalation.webhooks._post", new_callable=AsyncMock) as mock:
+            await send_slack("https://hooks.slack.com/test", self.MENTION_PAYLOAD, 0.9, ["t"], "self_harm")
+            payload = mock.call_args[0][1]
+            session_field = payload["blocks"][1]["fields"][0]["text"]
+        assert "<!channel>" not in session_field
+        assert "<@12345>" not in session_field
+
+    async def test_slack_backtick_breakout_neutralized(self):
+        with patch("humane_proxy.escalation.webhooks._post", new_callable=AsyncMock) as mock:
+            await send_slack("https://hooks.slack.com/test", self.BACKTICK_BREAKOUT, 0.9, ["t"], "self_harm")
+            payload = mock.call_args[0][1]
+            session_field = payload["blocks"][1]["fields"][0]["text"]
+        # The field must be wrapped by exactly the two literal backticks
+        # HumaneProxy itself added — none of the attacker's own backticks
+        # may reach the payload as a real backtick character at all
+        # (substituted for a fullwidth lookalike instead of escaped, since
+        # Slack's mrkdwn doesn't reliably honor backslash escapes here).
+        assert session_field.count("`") == 2
+        assert "｀" in session_field  # attacker's backtick, defanged
+
+    async def test_discord_mention_and_link_syntax_neutralized(self):
+        with patch("humane_proxy.escalation.webhooks._post", new_callable=AsyncMock) as mock:
+            await send_discord(
+                "https://discord.com/test",
+                self.MALICIOUS_LINK + " " + self.MENTION_PAYLOAD,
+                0.9, ["t"], "self_harm",
+            )
+            payload = mock.call_args[0][1]
+            session_value = payload["embeds"][0]["fields"][0]["value"]
+        assert "[Click here for help](https://evil.example/phish)" not in session_value
+        assert "<!channel>" not in session_value
+        assert "@everyone" not in session_value  # broken up by zero-width space
+        assert "everyone" in session_value  # content preserved, just defanged
+
+    async def test_teams_factset_link_syntax_neutralized(self):
+        """Teams had NO escaping at all before this fix — the sharpest case,
+        since Adaptive Card FactSet values can render markdown links."""
+        with patch("humane_proxy.escalation.webhooks._post", new_callable=AsyncMock) as mock:
+            await send_teams("https://outlook.office.com/test", self.MALICIOUS_LINK, 0.9, ["t"], "self_harm")
+            payload = mock.call_args[0][1]
+            facts = payload["attachments"][0]["content"]["body"][1]["facts"]
+            session_fact = next(f for f in facts if f["title"] == "Session")
+        assert "[Click here for help](https://evil.example/phish)" not in session_fact["value"]
+        assert "[" not in session_fact["value"] and "]" not in session_fact["value"]
+
+    async def test_normal_session_id_unaffected(self):
+        """Sanitization must not alter ordinary, non-adversarial values."""
+        with patch("humane_proxy.escalation.webhooks._post", new_callable=AsyncMock) as mock:
+            await send_slack("https://hooks.slack.com/test", "sess-abc-123", 0.9, ["t"], "self_harm")
+            payload = mock.call_args[0][1]
+            session_field = payload["blocks"][1]["fields"][0]["text"]
+        assert session_field == "*Session:*\n`sess-abc-123`"
