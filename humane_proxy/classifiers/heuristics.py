@@ -16,8 +16,68 @@ keyword and pattern matches.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from humane_proxy.config import get_config
+
+
+# ---------------------------------------------------------------------------
+# Unicode evasion normalization
+# ---------------------------------------------------------------------------
+# Prior to this, `classify()` only collapsed whitespace before matching —
+# no Unicode normalization at all. That made the keyword/pattern matching
+# below trivially bypassable:
+#   - zero-width characters inserted mid-keyword ("k\u200bill myself")
+#     broke every regex match outright -> classified "safe".
+#   - visually-identical non-Latin letters (Cyrillic "у" for Latin "y" in
+#     "kill mуself") not only missed the self_harm keyword, but could
+#     change which *other* pattern matched instead — flipping the result
+#     to the wrong category rather than just missing it.
+#
+# This is a lightweight, dependency-free normalization pass targeting the
+# realistic, demonstrated evasion patterns above — not a general-purpose
+# Unicode-confusables library. It runs once per message before any
+# matching happens.
+
+# Curated Cyrillic/Greek letters that are visually near-identical to a
+# Latin letter and have real-world use as spoofing substitutes. Only
+# genuinely confusable single letters are included (e.g. Cyrillic "в" is
+# excluded — it reads as Latin "B", not a lowercase letter, so folding it
+# would risk unrelated false matches).
+_CONFUSABLE_MAP: dict[str, str] = {
+    # Cyrillic -> Latin
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x",
+    "і": "i", "ѕ": "s", "ј": "j", "һ": "h", "ԁ": "d", "ԛ": "q", "ѡ": "w",
+    "А": "a", "Е": "e", "О": "o", "Р": "p", "С": "c", "У": "y", "Х": "x",
+    "І": "i", "Ѕ": "s", "Ј": "j",
+    # Greek -> Latin
+    "α": "a", "ο": "o", "ρ": "p", "ν": "v", "κ": "k", "ι": "i", "τ": "t",
+    "Α": "a", "Ο": "o", "Ρ": "p", "Ν": "v", "Κ": "k", "Ι": "i", "Τ": "t",
+}
+
+
+def _normalize_evasion(text: str) -> str:
+    """Neutralize common Unicode-based classifier-evasion tricks.
+
+    Order matters:
+      1. NFKC — folds fullwidth/compatibility forms to plain ASCII
+         (e.g. the fullwidth "ｋｉｌｌ" -> "kill").
+      2. Drop Unicode "Format" category characters (category ``Cf``) —
+         zero-width space/joiner/non-joiner, BOM, word joiner, soft
+         hyphen, etc. These render invisibly but split regex matches when
+         inserted mid-word.
+      3. Fold curated Cyrillic/Greek confusables to Latin (see
+         ``_CONFUSABLE_MAP``), then NFKD-decompose and drop combining
+         diacritical marks (category ``Mn``) to fold accented Latin
+         variants (e.g. "kìll" -> "kill").
+      4. Re-apply NFKC to recompose into a stable, minimal form.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    text = "".join(_CONFUSABLE_MAP.get(ch, ch) for ch in text)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return unicodedata.normalize("NFKC", text)
 
 
 def _word_boundary_pattern(phrase: str) -> re.Pattern[str]:
@@ -202,6 +262,10 @@ def classify(text: str) -> tuple[str, float, list[str]]:
     # Guard: empty / whitespace-only input.
     if not text or not text.strip():
         return "safe", 0.0, []
+
+    # Neutralize Unicode-based evasion (zero-width chars, homoglyphs,
+    # fullwidth forms, diacritics) before any keyword/pattern matching.
+    text = _normalize_evasion(text)
 
     # Normalize whitespace: collapse runs of spaces/tabs/newlines into a
     # single space.  Defeats evasion tricks like embedded newlines.
