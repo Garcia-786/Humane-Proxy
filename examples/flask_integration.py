@@ -2,9 +2,10 @@
 Flask before_request Hook Integration Example using HumaneProxy.
 
 Run with:
-    python examples.flask_integration.py
+    python examples/flask_integration.py
 """
 
+import os
 from flask import Flask, jsonify, request
 from humane_proxy import HumaneProxy
 
@@ -57,4 +58,5 @@ def chat():
 
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    debug_mode = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes")
+    app.run(port=5000, debug=debug_mode)
