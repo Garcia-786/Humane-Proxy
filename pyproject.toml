@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "humane-proxy"
-version = "0.4.0"
+version = "0.6.0"
 description = "Lightweight, plug-and-play AI safety middleware that protects humans."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
-    {name = "Vishisht Mishra", email = "Vishisht16@users.noreply.github.com"},
+    {name = "Vishisht Mishra", email = "mishra@vishisht.tech"},
 ]
 keywords = ["ai-safety", "llm", "middleware", "guardrails", "human-safety"]
 classifiers = [
@@ -44,12 +44,20 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "httpx",
+    "psutil>=5.9",
+    "humane-proxy[perf]",
 ]
 ml = [
     "sentence-transformers>=2.2.0",
 ]
+onnx = [
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "huggingface_hub>=0.20",
+]
 mcp = [
-    "fastmcp>=0.4.0",
+    # >=2.11 needed for fastmcp.server.auth.providers.jwt.StaticTokenVerifier
+    "fastmcp>=2.11",
 ]
 langchain = [
     "humane-proxy[mcp]",
@@ -79,8 +87,11 @@ telemetry = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20.0",
 ]
+perf = [
+    "orjson>=3.9",
+]
 all = [
-    "humane-proxy[ml,mcp,langchain,redis,postgres,llamaindex,crewai,autogen,telemetry]",
+    "humane-proxy[ml,onnx,mcp,langchain,redis,postgres,llamaindex,crewai,autogen,telemetry,perf]",
 ]
 
 [project.urls]

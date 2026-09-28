@@ -5,12 +5,12 @@ Requires: pip install humane-proxy[redis]
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from humane_proxy._json import dumps as _json_dumps, loads as _json_loads
 from humane_proxy.storage.base import EscalationStore
 
 logger = logging.getLogger("humane_proxy.storage.redis")
@@ -21,6 +21,18 @@ try:
 except ImportError:
     _REDIS_AVAILABLE = False
     _redis = None  # type: ignore[assignment]
+
+# Atomic rate-limit check-and-increment.  Runs inside Redis' single-threaded
+# event loop, so concurrent workers can never read the same counter value
+# before either increments it.
+# KEYS[1] = rate key, ARGV[1] = window seconds.  Returns the new count.
+_RATE_LIMIT_LUA = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
 
 
 class RedisStore(EscalationStore):
@@ -60,6 +72,7 @@ class RedisStore(EscalationStore):
         self._client = _redis.Redis.from_url(url, decode_responses=True)
         self._rate_limit_max = rate_limit_max
         self._rate_limit_window_s = rate_limit_window_hours * 3600
+        self._rate_limit_script = self._client.register_script(_RATE_LIMIT_LUA)
 
     def _key(self, *parts: str) -> str:
         return self._prefix + ":".join(parts)
@@ -87,7 +100,7 @@ class RedisStore(EscalationStore):
             "session_id": session_id,
             "category": category,
             "risk_score": str(risk_score),
-            "triggers": json.dumps(triggers or []),
+            "triggers": _json_dumps(triggers or []),
             "timestamp": str(ts),
             "message_hash": message_hash or "",
             "stage_reached": str(stage_reached),
@@ -108,7 +121,17 @@ class RedisStore(EscalationStore):
         session_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        date_from: float | None = None,
+        date_to: float | None = None,
+        sort_by: str = "timestamp",
+        sort_order: str = "desc",
     ) -> list[dict[str, Any]]:
+        """Return escalation records matching the filters.
+
+        Note: date_from, date_to, sort_by, and sort_order are not supported
+        by the Redis backend and are silently ignored.  Use a SQL backend
+        for full filter and sort support.
+        """
         if session_id:
             index_key = self._key("session", session_id)
         elif category:
@@ -130,7 +153,13 @@ class RedisStore(EscalationStore):
         *,
         category: str | None = None,
         session_id: str | None = None,
+        date_from: float | None = None,
+        date_to: float | None = None,
     ) -> int:
+        """Return the number of matching records.
+
+        Note: date_from and date_to are not supported by the Redis backend.
+        """
         if session_id:
             return self._client.zcard(self._key("session", session_id))
         elif category:
@@ -145,17 +174,33 @@ class RedisStore(EscalationStore):
         ids = self._client.zrange(self._key("session", session_id), 0, -1)
         if not ids:
             return 0
+        # Fetch categories first so the category indexes can be cleaned too —
+        # otherwise deleted ids linger there, inflating counts and breaking
+        # the right to erasure.
+        categories = {
+            esc_id: self._client.hget(self._key("esc", esc_id), "category")
+            for esc_id in ids
+        }
         pipe = self._client.pipeline()
         for esc_id in ids:
             pipe.delete(self._key("esc", esc_id))
             pipe.zrem(self._key("esc_timeline"), esc_id)
+            if categories.get(esc_id):
+                pipe.zrem(self._key("category", categories[esc_id]), esc_id)
         pipe.delete(self._key("session", session_id))
         pipe.execute()
         return len(ids)
 
     def stats(self) -> dict[str, Any]:
+        """Return aggregate statistics.
+
+        Redis can only efficiently return total count and category breakdown.
+        Advanced fields (by_day, top_sessions, by_stage, hourly_last_24h) are
+        returned as empty structures with ``limited_stats: True`` to avoid
+        full-scan performance degradation.  Switch to a SQL backend for full
+        analytics.
+        """
         total = self._client.zcard(self._key("esc_timeline"))
-        # Category counts by scanning category indexes.
         by_category: dict[str, int] = {}
         for key in self._client.scan_iter(match=self._key("category", "*")):
             cat_name = key.replace(self._prefix + "category:", "")
@@ -163,16 +208,20 @@ class RedisStore(EscalationStore):
         return {
             "total_escalations": total,
             "by_category": by_category,
-            "average_risk_score": 0.0,  # Would require full scan; skip for perf.
+            "average_risk_score": 0.0,  # Requires full scan — skipped for Redis.
+            "by_day": {},
+            "top_sessions": [],
+            "by_stage": {},
+            "hourly_last_24h": {},
+            "limited_stats": True,
         }
 
     def check_rate_limit(self, session_id: str) -> bool:
         rate_key = self._key("rate", session_id)
-        current = self._client.get(rate_key)
-        if current is None:
-            self._client.setex(rate_key, self._rate_limit_window_s, 1)
-            return True
-        return int(current) < self._rate_limit_max
+        current = self._rate_limit_script(
+            keys=[rate_key], args=[self._rate_limit_window_s]
+        )
+        return int(current) <= self._rate_limit_max
 
     @staticmethod
     def _parse_record(raw: dict[str, str]) -> dict[str, Any]:
@@ -187,7 +236,7 @@ class RedisStore(EscalationStore):
             "reasoning": raw.get("reasoning") or None,
         }
         try:
-            rec["triggers"] = json.loads(raw.get("triggers", "[]"))
+            rec["triggers"] = _json_loads(raw.get("triggers", "[]"))
         except Exception:
             rec["triggers"] = []
         return rec

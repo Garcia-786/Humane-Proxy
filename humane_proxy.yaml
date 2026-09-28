@@ -1,6 +1,16 @@
-# HumaneProxy — project-level configuration.
-# Values here override the package defaults.
-# See: https://github.com/your-org/humane-proxy#configuration
+# ---------------------------------------------------------------------------
+# HumaneProxy — EXAMPLE project-level configuration.
+#
+# This file is a template: copy it into your own project directory (or run
+# `humane-proxy init` to scaffold one) and adjust the values. HumaneProxy
+# reads `humane_proxy.yaml` from the current working directory at startup;
+# every value here overrides the package defaults, and HUMANE_PROXY_* env
+# vars override both.
+#
+# Only include the keys you want to change — anything omitted falls back
+# to the package defaults. Full reference:
+# https://github.com/Vishisht16/Humane-Proxy/blob/main/docs/CONFIGURATION.md
+# ---------------------------------------------------------------------------
 
 server:
   host: "0.0.0.0"

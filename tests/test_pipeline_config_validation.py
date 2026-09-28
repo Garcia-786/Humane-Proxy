@@ -7,24 +7,13 @@ receives malformed, incomplete, or otherwise invalid configuration values.
  
 Purpose
 -------
-* Prove which invalid-config scenarios the pipeline already survives (PASS).
-* Explicitly mark known crashes as expected failures (xfail) so CI stays
-  green while the bugs are tracked and fixed in a dedicated follow-up issue.
-* Provide a regression guard so that once those bugs are fixed the xfail
-  tests are automatically promoted to normal passes.
- 
-Findings summary
-----------------
-* PASS  – missing config sections, invalid stage ordering, duplicate stages,
-           negative / oversized thresholds, invalid Stage-3 provider strings,
-           invalid trajectory config, empty enabled_stages list.
-* XFAIL – ``enabled_stages`` set to a plain string → TypeError at init time.
-* XFAIL – ``enabled_stages`` set to None → TypeError at init time.
-* XFAIL – threshold value set to a non-numeric string → TypeError at
-           classify_sync() time.
- 
-These three xfail cases should be addressed in a follow-up issue by adding
-input validation / type coercion inside ``SafetyPipeline.__init__``.
+* Prove that invalid-config scenarios never take the safety pipeline down:
+  malformed values fall back to safe defaults with a logged warning.
+
+Covered scenarios: missing config sections, invalid stage ordering,
+duplicate stages, negative / oversized / non-numeric thresholds, invalid
+Stage-3 provider strings, invalid trajectory config, empty or non-list
+``enabled_stages`` values (string, None).
 """
  
 from __future__ import annotations
@@ -66,53 +55,32 @@ def base_config() -> dict:
  
 class TestInvalidEnabledStages:
     """Tests for non-list / falsy values supplied as ``enabled_stages``.
- 
-    Current behaviour: passing a plain string or None raises a TypeError
-    during pipeline initialisation because the pipeline does no type-checking
-    before using the value in membership tests (``2 in self.enabled_stages``).
-    These cases are marked xfail and should be fixed in a follow-up issue by
-    adding input validation in ``SafetyPipeline.__init__``.
+
+    The pipeline validates the value at init time: non-list values fall
+    back to ``[1]`` with a logged warning, so classification always works.
     """
- 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=TypeError,
-        reason=(
-            "BUG: enabled_stages='invalid_string' causes TypeError "
-            "('in <string>' requires string as left operand, not int). "
-            "Pipeline should validate and fall back to [1]."
-        ),
-    )
+
     def test_enabled_stages_not_list(self, base_config):
-        """A plain string for enabled_stages currently crashes with TypeError.
- 
-        Expected (ideal): pipeline falls back to ``[1]`` and returns a result.
-        Actual (current): ``TypeError`` at ``__init__`` time.
-        """
+        """A plain string for enabled_stages falls back to [1]."""
         base_config["pipeline"]["enabled_stages"] = "invalid_string"
         pipeline = SafetyPipeline(base_config)
+        assert pipeline.enabled_stages == [1]
         result = pipeline.classify_sync("hello", "test")
         assert result.classification.category == "safe"
- 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=TypeError,
-        reason=(
-            "BUG: enabled_stages=None causes TypeError "
-            "('NoneType' is not iterable). "
-            "Pipeline should validate and fall back to [1]."
-        ),
-    )
+
     def test_enabled_stages_none(self, base_config):
-        """None for enabled_stages currently crashes with TypeError.
- 
-        Expected (ideal): pipeline falls back to ``[1]`` and returns a result.
-        Actual (current): ``TypeError`` at ``__init__`` time.
-        """
+        """None for enabled_stages falls back to [1]."""
         base_config["pipeline"]["enabled_stages"] = None
         pipeline = SafetyPipeline(base_config)
+        assert pipeline.enabled_stages == [1]
         result = pipeline.classify_sync("hello", "test")
         assert result.classification.category == "safe"
+
+    def test_enabled_stages_filters_invalid_entries(self, base_config):
+        """Unknown stage numbers and junk entries are dropped, order kept."""
+        base_config["pipeline"]["enabled_stages"] = [2, "junk", 1, 9, 2]
+        pipeline = SafetyPipeline(base_config)
+        assert pipeline.enabled_stages == [2, 1]
  
     def test_enabled_stages_empty_list_behavior(self, base_config):
         """An empty list for enabled_stages is handled without crashing.
@@ -133,10 +101,10 @@ class TestInvalidEnabledStages:
  
 class TestInvalidThresholdValues:
     """Tests for out-of-range or wrongly-typed threshold configuration values.
- 
-    Numeric edge cases (negative, very large) are already handled gracefully
-    by the pipeline.  A non-numeric string type causes a TypeError at
-    classify_sync() time and is marked xfail.
+
+    Numeric edge cases (negative, very large) are handled by the pipeline's
+    ordering guarantees; non-numeric values are coerced to safe defaults at
+    init time with a logged warning.
     """
  
     def test_negative_thresholds(self, base_config):
@@ -167,26 +135,19 @@ class TestInvalidThresholdValues:
         assert result.classification.category == "self_harm"
         assert result.should_escalate is True
  
-    @pytest.mark.xfail(
-        strict=True,
-        raises=TypeError,
-        reason=(
-            "BUG: stage1_ceiling='not_a_float' causes TypeError "
-            "('<=' not supported between float and str) at classify_sync() time. "
-            "Pipeline should coerce or reject non-numeric threshold values."
-        ),
-    )
     def test_threshold_wrong_type(self, base_config):
-        """A string value for stage1_ceiling currently crashes with TypeError.
- 
-        Expected (ideal): pipeline coerces or rejects the value and returns
-        a result.
-        Actual (current): ``TypeError`` raised inside ``classify_sync``.
-        """
+        """A non-numeric stage1_ceiling falls back to the default (0.3)."""
         base_config["pipeline"]["stage1_ceiling"] = "not_a_float"
         pipeline = SafetyPipeline(base_config)
+        assert pipeline.stage1_ceiling == 0.3
         result = pipeline.classify_sync("hello", "test")
         assert result.classification.category == "safe"
+
+    def test_numeric_string_threshold_is_coerced(self, base_config):
+        """A numeric string like '0.6' is accepted via float coercion."""
+        base_config["pipeline"]["stage1_ceiling"] = "0.6"
+        pipeline = SafetyPipeline(base_config)
+        assert pipeline.stage1_ceiling == 0.6
  
  
 # ---------------------------------------------------------------------------

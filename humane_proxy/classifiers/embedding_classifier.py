@@ -14,26 +14,38 @@
 
 """Stage-2 embedding classifier — semantic similarity-based safety detection.
 
-Uses ``sentence-transformers`` to encode user messages and compare them
-against pre-defined anchor sentences for each safety category.  The
-cosine similarity between the query embedding and the top-K most similar
-anchors determines the category and score.
+Encodes user messages and compares them against pre-defined anchor
+sentences for each safety category.  The cosine similarity between the
+query embedding and the top-K most similar anchors determines the
+category and score.
 
-**Install:** ``pip install humane-proxy[ml]``
+Two inference backends are supported (config key ``stage2.backend``):
 
-If the ML dependencies are not installed, the classifier returns a
-neutral :class:`ClassificationResult` (category ``"safe"``, score ``0.0``)
-so the pipeline gracefully degrades to Stage 1 only.
+- ``"onnx"`` — ONNX Runtime on the repo's pre-exported graph; no PyTorch.
+  **Install:** ``pip install humane-proxy[onnx]``
+- ``"sentence-transformers"`` — the classic PyTorch path.
+  **Install:** ``pip install humane-proxy[ml]``
+- ``"auto"`` (default) — prefer ONNX when installed, else fall back to
+  sentence-transformers. Both produce numerically equivalent embeddings.
+
+If neither backend is installed, the classifier returns a neutral
+:class:`ClassificationResult` (category ``"safe"``, score ``0.0``) so the
+pipeline gracefully degrades to Stage 1 only.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import logging
 import os
 import threading
+import time
+from collections import OrderedDict
 from typing import Any
 from humane_proxy.telemetry import traced_stage
 from humane_proxy.classifiers.models import ClassificationResult
+from humane_proxy.classifiers import onnx_encoder
 
 logger = logging.getLogger("humane_proxy.classifiers.embedding")
 
@@ -52,10 +64,54 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Process-level model singleton cache.
-# Keyed by model name so different configs don't clash.
+# Keyed by "backend:model_name" so different configs don't clash.
 # ---------------------------------------------------------------------------
 _model_cache: dict[str, Any] = {}
 _model_lock = threading.Lock()
+
+# Anchor embeddings, keyed by "backend:model_name".  The anchor sentences
+# are static, so encoding them once per process is enough — previously
+# every EmbeddingClassifier instance re-encoded all ~26 anchors, which made
+# per-call pipeline construction (MCP tools, integrations) very expensive.
+# Value: (anchor_embeddings_by_category, benign_embeddings).
+_anchor_cache: dict[str, tuple[dict[str, Any], Any]] = {}
+
+# TTL result cache.  The model is deterministic, so identical messages
+# within the TTL are served from memory instead of re-encoding
+# (~0.01 ms vs ~100+ ms).  Keyed on
+# (model name, scoring-config fingerprint, sha256(text)) so a config
+# change never serves results computed under old thresholds; bounded
+# LRU with per-entry expiry.
+_RESULT_CACHE_MAX = 1024
+_RESULT_CACHE_TTL_S = 300.0
+_result_cache: OrderedDict[tuple, tuple[float, ClassificationResult]] = OrderedDict()
+_result_cache_lock = threading.Lock()
+
+
+def _result_cache_get(key: tuple) -> ClassificationResult | None:
+    with _result_cache_lock:
+        entry = _result_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, result = entry
+        if time.monotonic() >= expires_at:
+            del _result_cache[key]
+            return None
+        _result_cache.move_to_end(key)
+        # Copy — later pipeline stages merge/append triggers, and the
+        # cached instance must stay pristine.
+        return dataclasses.replace(result, triggers=list(result.triggers))
+
+
+def _result_cache_put(key: tuple, result: ClassificationResult) -> None:
+    with _result_cache_lock:
+        _result_cache[key] = (
+            time.monotonic() + _RESULT_CACHE_TTL_S,
+            dataclasses.replace(result, triggers=list(result.triggers)),
+        )
+        _result_cache.move_to_end(key)
+        while len(_result_cache) > _RESULT_CACHE_MAX:
+            _result_cache.popitem(last=False)
 
 # ---------------------------------------------------------------------------
 # Anchor sentences — diverse, realistic expressions of each category.
@@ -74,6 +130,14 @@ SELF_HARM_ANCHORS: list[str] = [
     "I want to disappear forever",
     "I wrote a goodbye note to my family",
     "I am planning to jump off a bridge",
+    # Method / advice seeking
+    "What is the easiest way to kill myself",
+    "Which drugs will let me overdose the fastest",
+    "How can I hurt myself without leaving visible scars",
+    # Eating disorders
+    "How can I starve myself without anyone noticing",
+    "Give me tips on being anorexic",
+    "How do I make myself throw up after every meal",
 ]
 
 CRIMINAL_ANCHORS: list[str] = [
@@ -85,6 +149,19 @@ CRIMINAL_ANCHORS: list[str] = [
     "How do I traffic drugs across the border",
     "Tell me how to hack into a power grid",
     "How do I make ricin at home",
+    # Violence against persons
+    "What is the best way to attack someone and hurt them badly",
+    "How do I sabotage someone's car so they get hurt",
+    "How can I strangle a person with my bare hands",
+    # Scams and fraud
+    "Help me write a phishing email to steal people's passwords",
+    "How do I scam elderly people out of their savings",
+    "How can I use a stolen credit card without getting caught",
+    # Weapons acquisition
+    "Where can I buy an illegal gun without a background check",
+    # Child safety
+    "Where can I find sexual content involving minors",
+    "How do I get a young child to meet me alone without their parents knowing",
 ]
 
 # ---------------------------------------------------------------------------
@@ -126,19 +203,33 @@ def _cosine_similarity(a: Any, b: Any) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _load_model_singleton(model_name: str) -> Any:
-    """Load a SentenceTransformer model exactly once per process.
+def _load_model_singleton(model_name: str, backend: str = "sentence-transformers") -> Any:
+    """Load a Stage-2 encoder exactly once per process.
 
-    Thread-safe.  Subsequent calls with the same *model_name* return
-    the cached instance without any disk I/O.
+    Thread-safe.  Subsequent calls with the same *backend* + *model_name*
+    return the cached instance without any disk I/O.
     """
-    if model_name in _model_cache:
-        return _model_cache[model_name]
+    cache_key = f"{backend}:{model_name}"
+    if cache_key in _model_cache:
+        return _model_cache[cache_key]
 
     with _model_lock:
         # Double-check after acquiring lock.
-        if model_name in _model_cache:
-            return _model_cache[model_name]
+        if cache_key in _model_cache:
+            return _model_cache[cache_key]
+
+        if backend == "onnx":
+            if not onnx_encoder.ONNX_AVAILABLE:
+                return None
+            try:
+                model = onnx_encoder.OnnxEncoder(model_name)
+                model.encode(["warmup"], show_progress_bar=False)
+                _model_cache[cache_key] = model
+                logger.info("Stage-2 model loaded and cached: %s", cache_key)
+                return model
+            except Exception:
+                logger.exception("Failed to load ONNX model: %s", model_name)
+                return None
 
         if not _ML_AVAILABLE:
             return None
@@ -150,8 +241,8 @@ def _load_model_singleton(model_name: str) -> Any:
             model = SentenceTransformer(model_name)
             # Warm-up encode to force any lazy JIT / CUDA init.
             model.encode(["warmup"], show_progress_bar=False)
-            _model_cache[model_name] = model
-            logger.info("Stage-2 model loaded and cached: %s", model_name)
+            _model_cache[cache_key] = model
+            logger.info("Stage-2 model loaded and cached: %s", cache_key)
             return model
         except Exception:
             logger.exception("Failed to load embedding model: %s", model_name)
@@ -186,6 +277,9 @@ class EmbeddingClassifier:
     def __init__(self, config: dict) -> None:
         self._config: dict = config.get("stage2", {})
         self._model: Any = None
+        self._model_name: str = ""
+        self._backend: str = ""
+        self._model_key: str = ""
         self._anchor_embeddings: dict[str, Any] = {}
         self._benign_embeddings: Any = None
         self._loaded: bool = False
@@ -198,30 +292,73 @@ class EmbeddingClassifier:
         return self._model is not None
 
     def _try_load(self) -> None:
-        """Attempt to load the sentence-transformer model (once)."""
+        """Attempt to load a Stage-2 encoder (once).
+
+        Backend resolution order comes from ``stage2.backend``:
+        ``"auto"`` tries ONNX first (lighter footprint, faster CPU
+        inference), then sentence-transformers; an explicit value tries
+        only that backend.
+        """
         self._loaded = True
+        self._model_name = self._config.get("model", "all-MiniLM-L6-v2")
 
-        if not _ML_AVAILABLE:
-            logger.info(
-                "Stage-2 disabled: sentence-transformers not installed.  "
-                "Install with: pip install humane-proxy[ml]"
+        requested = self._config.get("backend", "auto")
+        orders = {
+            "auto": ["onnx", "sentence-transformers"],
+            "onnx": ["onnx"],
+            "sentence-transformers": ["sentence-transformers"],
+        }
+        order = orders.get(requested)
+        if order is None:
+            logger.warning(
+                "Unknown stage2.backend %r; using auto resolution", requested
             )
-            return
+            order = orders["auto"]
 
-        model_name = self._config.get("model", "all-MiniLM-L6-v2")
-        self._model = _load_model_singleton(model_name)
-        if self._model is not None:
-            self._precompute_anchors()
+        for backend in order:
+            if backend == "onnx" and not onnx_encoder.ONNX_AVAILABLE:
+                logger.debug("Stage-2 ONNX backend unavailable (not installed)")
+                continue
+            if backend == "sentence-transformers" and not _ML_AVAILABLE:
+                logger.debug(
+                    "Stage-2 sentence-transformers backend unavailable "
+                    "(not installed)"
+                )
+                continue
+            model = _load_model_singleton(self._model_name, backend)
+            if model is not None:
+                self._model = model
+                self._backend = backend
+                self._model_key = f"{backend}:{self._model_name}"
+                logger.info("Stage-2 using %s backend", backend)
+                self._precompute_anchors()
+                return
+
+        logger.info(
+            "Stage-2 disabled: no inference backend available.  Install "
+            "with: pip install humane-proxy[onnx] (ONNX Runtime, no "
+            "PyTorch) or pip install humane-proxy[ml] (sentence-transformers)"
+        )
 
     def _precompute_anchors(self) -> None:
-        """Encode all anchor sentences and cache the vectors."""
-        for category, sentences in ANCHORS.items():
-            self._anchor_embeddings[category] = self._model.encode(
-                sentences, show_progress_bar=False,
-            )
-        self._benign_embeddings = self._model.encode(
-            BENIGN_ANCHORS, show_progress_bar=False,
-        )
+        """Encode all anchor sentences once per process (per backend+model)."""
+        cached = _anchor_cache.get(self._model_key)
+        if cached is None:
+            with _model_lock:
+                cached = _anchor_cache.get(self._model_key)
+                if cached is None:
+                    anchor_embeddings = {
+                        category: self._model.encode(
+                            sentences, show_progress_bar=False,
+                        )
+                        for category, sentences in ANCHORS.items()
+                    }
+                    benign_embeddings = self._model.encode(
+                        BENIGN_ANCHORS, show_progress_bar=False,
+                    )
+                    cached = (anchor_embeddings, benign_embeddings)
+                    _anchor_cache[self._model_key] = cached
+        self._anchor_embeddings, self._benign_embeddings = cached
         
     @traced_stage("stage2.embeddings")
     def classify(self, text: str) -> ClassificationResult:
@@ -234,6 +371,20 @@ class EmbeddingClassifier:
 
         if self._model is None:
             return ClassificationResult(stage=2)
+
+        # TTL cache: identical messages within the window skip the encoder.
+        cache_key = (
+            self._model_key,
+            self._config.get("safe_threshold", 0.35),
+            self._config.get("score_ceiling", 0.65),
+            self._config.get("ambiguity_low", 0.30),
+            self._config.get("ambiguity_high", 0.55),
+            self._config.get("ambiguity_margin", 0.05),
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )
+        cached_result = _result_cache_get(cache_key)
+        if cached_result is not None:
+            return cached_result
 
         # Encode the query text.
         query_vec = self._model.encode([text], show_progress_bar=False)[0]
@@ -253,17 +404,35 @@ class EmbeddingClassifier:
 
         threshold = self._config.get("safe_threshold", 0.35)
         if best_score < threshold:
-            return ClassificationResult(category="safe", score=0.0, stage=2)
+            result = ClassificationResult(category="safe", score=0.0, stage=2)
+            _result_cache_put(cache_key, result)
+            return result
 
-        # Normalise to [0, 1].
-        normalised = max(0.0, min(1.0, best_score))
+        # -------------------------------------------------------------------
+        # Calibration: raw cosine similarity for genuinely harmful text tops
+        # out around 0.55-0.65 with MiniLM-class models, while the pipeline's
+        # escalation thresholds (0.5 self-harm, 0.7 criminal) were tuned to
+        # Stage-1 keyword scores.  Map the meaningful cosine band
+        # [safe_threshold, score_ceiling] onto the full [0, 1] range so those
+        # thresholds are reachable by embeddings too.
+        # -------------------------------------------------------------------
+        ceiling = self._config.get("score_ceiling", 0.65)
+        if ceiling > threshold:
+            normalised = max(
+                0.0, min(1.0, (best_score - threshold) / (ceiling - threshold))
+            )
+        else:
+            # Degenerate config — fall back to the raw clipped score.
+            normalised = max(0.0, min(1.0, best_score))
 
         triggers = [f"embedding:{best_cat}:{normalised:.3f}"]
 
         # -------------------------------------------------------------------
-        # Ambiguity dampening: if the score sits in the grey zone for
+        # Ambiguity dampening: if the RAW score sits in the grey zone for
         # self_harm, compare against benign anchors.  If benign semantics
-        # are competitive, halve the score to avoid false positives.
+        # are competitive, halve the calibrated score to avoid false
+        # positives.  The band and margin are defined on the raw cosine
+        # scale, matching the anchors they were tuned against.
         # -------------------------------------------------------------------
         ambiguity_low = self._config.get("ambiguity_low", 0.30)
         ambiguity_high = self._config.get("ambiguity_high", 0.55)
@@ -271,7 +440,7 @@ class EmbeddingClassifier:
 
         if (
             best_cat == "self_harm"
-            and ambiguity_low <= normalised <= ambiguity_high
+            and ambiguity_low <= best_score <= ambiguity_high
             and self._benign_embeddings is not None
         ):
             benign_sims = [
@@ -280,13 +449,15 @@ class EmbeddingClassifier:
             ]
             top_benign = max(benign_sims) if benign_sims else 0.0
 
-            if top_benign >= (normalised - ambiguity_margin):
+            if top_benign >= (best_score - ambiguity_margin):
                 normalised *= 0.5
                 triggers.append("embedding:ambiguity_dampened")
 
-        return ClassificationResult(
+        result = ClassificationResult(
             category=best_cat,
             score=normalised,
             triggers=triggers,
             stage=2,
         )
+        _result_cache_put(cache_key, result)
+        return result

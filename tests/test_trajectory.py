@@ -256,3 +256,27 @@ class TestMemoryEviction:
         sid = "evict-survivor-v3"
         detect_spike(sid, 0.3)
         assert sid in session_history
+
+
+class TestForgetSession:
+    """Right-to-erasure hook for in-memory trajectory state."""
+
+    def test_forget_session_clears_state(self):
+        from humane_proxy.risk import trajectory as traj
+
+        traj.analyze("erase-me", 0.9, "self_harm")
+        assert "erase-me" in traj.session_history
+
+        assert traj.forget_session("erase-me") is True
+        assert "erase-me" not in traj.session_history
+        assert "erase-me" not in traj._category_history
+        assert "erase-me" not in traj._last_spike_by_session
+
+        snap = traj.snapshot("erase-me")
+        assert snap.message_count == 0
+        assert snap.category_counts == {}
+
+    def test_forget_unknown_session_is_noop(self):
+        from humane_proxy.risk import trajectory as traj
+
+        assert traj.forget_session("never-seen-session") is False

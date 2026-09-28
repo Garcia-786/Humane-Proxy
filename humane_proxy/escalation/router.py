@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
+from collections import deque
 
 from humane_proxy.config import get_config
 from humane_proxy.escalation.local_db import check_rate_limit, log_escalation
@@ -11,73 +14,189 @@ from humane_proxy.escalation.local_db import check_rate_limit, log_escalation
 logger = logging.getLogger("humane_proxy.escalation")
 
 # ---------------------------------------------------------------------------
+# Alert-rate backstops: per-IP layer + global outer ceiling
+# ---------------------------------------------------------------------------
+# The per-session limiter in `check_rate_limit()` is keyed entirely on
+# `session_id`, which is caller-supplied and unauthenticated (see
+# middleware/interceptor.py — it's read straight off the request body with
+# no validation). That means the per-session quota can be trivially
+# defeated by rotating `session_id` on every request: each "new" session
+# gets its own fresh quota, so an attacker can trigger unlimited operator
+# alerts (Slack/Discord/Teams/PagerDuty/email) even though each individual
+# session never exceeds its own limit.
+#
+# Two backstops sit on top of the per-session check, evaluated in order:
+#
+#   1. Per-IP layer (checked on every request). Keyed on `request.client.host`
+#      — the raw TCP peer address, NOT any caller-supplied header (X-Forwarded-For
+#      etc. are trivially spoofable and are intentionally not trusted here).
+#      Rotating session_id doesn't help an attacker anymore, since a single
+#      real network origin still has one IP-scoped quota.
+#
+#   2. Global outer ceiling (last line of defense). Keyed on nothing —
+#      counts every alert regardless of session_id or IP. Catches the
+#      distributed case (many real IPs, e.g. a botnet) where the per-IP
+#      layer alone wouldn't help, at the cost of being a blunt, shared cap.
+#
+# Both are in-process (sliding window over a deque of timestamps, guarded
+# by a lock). For multi-process/multi-worker deployments each is per-process,
+# not shared across the fleet; a Redis-backed version would be needed for a
+# hard cap there. Tracked as a possible follow-up — this still closes the
+# single-process bypass, which is the exploitable case for the default
+# (non-Redis) deployment most users run.
+
+_MAX_TRACKED_IPS = 10_000  # bound memory: cap distinct IP buckets tracked
+
+_global_alert_lock = threading.Lock()
+_global_alert_timestamps: deque[float] = deque()
+
+_ip_alert_lock = threading.Lock()
+_ip_alert_timestamps: dict[str, deque[float]] = {}
+
+
+def _reset_global_rate_limit() -> None:
+    """Clear in-process global-limiter state. Test-only helper."""
+    with _global_alert_lock:
+        _global_alert_timestamps.clear()
+
+
+def _reset_ip_rate_limit() -> None:
+    """Clear in-process IP-limiter state. Test-only helper."""
+    with _ip_alert_lock:
+        _ip_alert_timestamps.clear()
+
+
+def _ip_rate_limit_allows(client_ip: str | None) -> bool:
+    """Return True if firing another alert stays within this IP's quota.
+
+    Config keys (under ``escalation:``):
+      - ``ip_rate_limit_max`` (default 10)
+      - ``ip_rate_limit_window_seconds`` (default 60)
+
+    Set ``ip_rate_limit_max`` to ``0`` to disable this layer.
+    """
+    cfg = get_config()
+    esc_cfg = cfg.get("escalation", {}) or {}
+    max_alerts = esc_cfg.get("ip_rate_limit_max", 10)
+    window_s = esc_cfg.get("ip_rate_limit_window_seconds", 60)
+
+    if not max_alerts or max_alerts <= 0:
+        return True  # layer disabled
+
+    client_ip = client_ip or "unknown"
+    now = time.monotonic()
+    with _ip_alert_lock:
+        bucket = _ip_alert_timestamps.get(client_ip)
+        if bucket is None:
+            if len(_ip_alert_timestamps) >= _MAX_TRACKED_IPS:
+                # Bound memory under sustained traffic from many distinct
+                # IPs: evict the oldest-inserted bucket to make room.
+                _ip_alert_timestamps.pop(next(iter(_ip_alert_timestamps)))
+            bucket = deque()
+            _ip_alert_timestamps[client_ip] = bucket
+
+        while bucket and now - bucket[0] > window_s:
+            bucket.popleft()
+        if len(bucket) >= max_alerts:
+            return False
+        bucket.append(now)
+        return True
+
+
+def _global_rate_limit_allows() -> bool:
+    """Return True if firing another alert stays within the global ceiling.
+
+    Config keys (under ``escalation:``):
+      - ``global_rate_limit_max`` (default 100)
+      - ``global_rate_limit_window_seconds`` (default 60)
+
+    Set ``global_rate_limit_max`` to ``0`` to disable this backstop.
+    """
+    cfg = get_config()
+    esc_cfg = cfg.get("escalation", {}) or {}
+    max_alerts = esc_cfg.get("global_rate_limit_max", 100)
+    window_s = esc_cfg.get("global_rate_limit_window_seconds", 60)
+
+    if not max_alerts or max_alerts <= 0:
+        return True  # backstop disabled
+
+    now = time.monotonic()
+    with _global_alert_lock:
+        while _global_alert_timestamps and now - _global_alert_timestamps[0] > window_s:
+            _global_alert_timestamps.popleft()
+        if len(_global_alert_timestamps) >= max_alerts:
+            return False
+        _global_alert_timestamps.append(now)
+        return True
+
+
+# ---------------------------------------------------------------------------
 # International crisis resource database
 # ---------------------------------------------------------------------------
 
-CARE_RESPONSE_BLOCK = """\
-It sounds like you may be going through something really difficult right now. \
-You are not alone, and there are people who care about you and want to help.
+# International crisis resource database
+# ---------------------------------------------------------------------------
+# Single source of truth: per-country resource blocks, assembled into
+# CARE_RESPONSE_BLOCK below. Keeping these structured (rather than one opaque
+# string) lets an operator optionally surface a specific region's resources
+# first via `safety.categories.self_harm.region`, without dropping the others.
 
-Please reach out to a crisis service near you:
+_CARE_INTRO = (
+    "It sounds like you may be going through something really difficult right now. "
+    "You are not alone, and there are people who care about you and want to help.\n\n"
+    "Please reach out to a crisis service near you:"
+)
 
-🇺🇸 United States
-  • 988 Suicide & Crisis Lifeline: Call or text 988
-  • Crisis Text Line: Text HOME to 741741
+# Ordered: code -> resource block. Order preserved for the default (no-region) message.
+_CRISIS_RESOURCES: dict[str, str] = {
+    "US": "United States\n  • 988 Suicide & Crisis Lifeline: Call or text 988\n  • Crisis Text Line: Text HOME to 741741",
+    "IN": "India\n  • iCall (TISS): 9152987821\n  • Vandrevala Foundation: 1860-2662-345 (24/7)\n  • NIMHANS: 080-46110007",
+    "GB": "United Kingdom\n  • Samaritans: 116 123 (free, 24/7)\n  • PAPYRUS (youth): 0800 068 4141",
+    "AU": "Australia\n  • Lifeline: 13 11 14\n  • Beyond Blue: 1300 22 4636",
+    "CA": "Canada\n  • Talk Suicide Canada: 1-833-456-4566\n  • Crisis Text Line: Text HOME to 686868",
+    "DE": "Germany\n  • Telefonseelsorge: 0800 111 0 111 (free, 24/7)",
+    "FR": "France\n  • Suicide Écoute: 01 45 39 40 00\n  • Numéro National Prévention Suicide: 3114",
+    "BR": "Brazil\n  • CVV (Centro de Valorização da Vida): 188",
+    "ZA": "South Africa\n  • SADAG: 0800 567 567",
+    "JP": "Japan\n  • Inochi no Denwa: 0120-783-556",
+    "KR": "South Korea\n  • Crisis Counseling Hotline: 1393",
+    "ES": "Spain\n  • Línea de Atención a conducta suicida: 024",
+    "IT": "Italy\n  • Telefono Amico: 800 274 274",
+    "MX": "Mexico\n  • SAPTEL: 800 290 0024",
+    "NZ": "New Zealand\n  • Need to Talk?: 1737",
+}
 
-🇮🇳 India
-  • iCall (TISS): 9152987821
-  • Vandrevala Foundation: 1860-2662-345 (24/7)
-  • NIMHANS: 080-46110007
+_CARE_INTERNATIONAL = (
+    "International:\n"
+    "  • IASP Crisis Centres: https://www.iasp.info/resources/Crisis_Centres/\n"
+    "  • Befrienders Worldwide: https://www.befrienders.org"
+)
 
-🇬🇧 United Kingdom
-  • Samaritans: 116 123 (free, 24/7)
-  • PAPYRUS (youth): 0800 068 4141
+_CARE_EMERGENCY = (
+    "If you are in immediate danger, please call your local emergency number "
+    "(e.g. 112, 911, 999, 100)."
+)
 
-🇦🇺 Australia
-  • Lifeline: 13 11 14
-  • Beyond Blue: 1300 22 4636
 
-🇨🇦 Canada
-  • Talk Suicide Canada: 1-833-456-4566
-  • Crisis Text Line: Text HOME to 686868
+def _build_care_block(region: str | None = None) -> str:
+    """Assemble the crisis-resource block.
 
-🇩🇪 Germany
-  • Telefonseelsorge: 0800 111 0 111 (free, 24/7)
+    When ``region`` matches a known country code, that country's resources are
+    surfaced first; all other resources still follow. When ``region`` is None
+    or unknown, the full list is returned in the default order.
+    """
+    ordered = list(_CRISIS_RESOURCES.values())
+    if region:
+        block = _CRISIS_RESOURCES.get(region.strip().upper())
+        if block:
+            ordered = [block] + [b for b in ordered if b != block]
+    body = "\n\n".join(ordered)
+    return f"{_CARE_INTRO}\n\n{body}\n\n{_CARE_INTERNATIONAL}\n\n{_CARE_EMERGENCY}"
 
-🇫🇷 France
-  • Suicide Écoute: 01 45 39 40 00
-  • Numéro National Prévention Suicide: 3114
 
-🇧🇷 Brazil
-  • CVV (Centro de Valorização da Vida): 188
-
-🇿🇦 South Africa
-  • SADAG: 0800 567 567
-
-🇯🇵 Japan
-  • Inochi no Denwa: 0120-783-556
-
-🇰🇷 South Korea
-  • Crisis Counseling Hotline: 1393
-
-🇪🇸 Spain
-  • Línea de Atención a conducta suicida: 024
-
-🇮🇹 Italy
-  • Telefono Amico: 800 274 274
-
-🇲🇽 Mexico
-  • SAPTEL: 800 290 0024
-
-🇳🇿 New Zealand
-  • Need to Talk?: 1737
-
-🌐 International:
-  • IASP Crisis Centres: https://www.iasp.info/resources/Crisis_Centres/
-  • Befrienders Worldwide: https://www.befrienders.org
-
-If you are in immediate danger, please call your local emergency number (e.g. 112, 911, 999, 100).\
-"""
+# Default full message (no region). Kept as a module constant for backward
+# compatibility — existing callers and tests reference CARE_RESPONSE_BLOCK.
+CARE_RESPONSE_BLOCK = _build_care_block()
 
 CARE_CONTEXT_INJECTION = (
     "\n[SYSTEM NOTE: The user's message may indicate emotional distress or self-harm ideation. "
@@ -88,16 +207,21 @@ CARE_CONTEXT_INJECTION = (
 
 
 def _get_care_response() -> str:
-    """Return the configured block message, falling back to the built-in one."""
-    cfg = get_config()
-    custom = (
-        cfg.get("safety", {})
-        .get("categories", {})
-        .get("self_harm", {})
-        .get("block_message", "")
-    )
-    return custom.strip() if custom else CARE_RESPONSE_BLOCK
+    """Return the configured block message, falling back to the built-in one.
 
+    Honors an optional ``safety.categories.self_harm.region`` setting, which
+    surfaces that country's resources first. A custom ``block_message`` still
+    takes precedence over both.
+    """
+    cfg = get_config()
+    self_harm = cfg.get("safety", {}).get("categories", {}).get("self_harm", {})
+    custom = self_harm.get("block_message", "")
+    if custom and custom.strip():
+        return custom.strip()
+    region = self_harm.get("region", "")
+    if region:
+        return _build_care_block(region)
+    return CARE_RESPONSE_BLOCK
 
 def _get_response_mode() -> str:
     """Return 'block' (default) or 'forward'."""
@@ -152,14 +276,19 @@ def escalate(
     message_hash: str | None = None,
     stage_reached: int = 1,
     reasoning: str | None = None,
+    client_ip: str | None = None,
 ) -> dict:
     """Handle a flagged interaction.
 
     Flow
     ----
-    1. Check the per-session rate limit.
-    2. If allowed → log to SQLite, emit a CRITICAL log, fire webhooks.
-    3. Return a result dict indicating the outcome.
+    1. Persist the event to the audit log — always.  The audit trail must
+       be complete; only *alerting* is rate limited.
+    2. Check the per-session alert rate limit, then the per-IP layer, then
+       the global outer ceiling.
+    3. If within quota → emit a CRITICAL log and fire webhooks.
+    4. Return a result dict indicating the outcome (``alerted`` says
+       whether operator notifications went out).
 
     Parameters
     ----------
@@ -177,28 +306,41 @@ def escalate(
         Which pipeline stage (1, 2, or 3) produced the final result.
     reasoning:
         Stage-3 reasoning string (if available).
+    client_ip:
+        Raw TCP peer address of the caller (``request.client.host``), used
+        to key the per-IP alert-rate backstop. Optional for backward
+        compatibility with existing callers; falls back to a shared
+        ``"unknown"`` bucket when omitted.
 
     Returns
     -------
     dict
-        ``{"escalated": True/False, "reason": "...", "category": "..."}``
+        ``{"escalated": bool, "alerted": bool, "reason": "...",
+           "category": "..."}`` — ``escalated`` means the event was
+        recorded; ``alerted`` means operator notifications were sent.
     """
     triggers = triggers or []
 
-    # --- Rate-limit gate ---
-    if not check_rate_limit(session_id):
-        logger.warning(
-            "[RATE-LIMITED] session=%s  category=%s  risk_score=%.2f — suppressed (quota exhausted)",
-            session_id, category, risk_score,
-        )
-        return {
-            "escalated": False,
-            "reason": "rate_limited",
-            "session_id": session_id,
-            "category": category,
-        }
+    # --- Alert rate-limit check (before logging so the quota is counted
+    # against events already persisted in the window) ---
+    # Three independent, ordered checks — each only runs if the previous
+    # one passed, so a request already blocked by an earlier layer never
+    # consumes quota from a later one:
+    #   1. Per-session quota (existing) — defeated by rotating session_id.
+    #   2. Per-IP layer (new) — keyed on the real TCP peer address, so
+    #      rotating session_id alone can no longer bypass rate limiting.
+    #   3. Global outer ceiling (existing) — catches the distributed case
+    #      (many real IPs) that the per-IP layer alone can't stop.
+    session_limit_ok = check_rate_limit(session_id)
+    ip_limit_ok = _ip_rate_limit_allows(client_ip) if session_limit_ok else True
+    global_limit_ok = (
+        _global_rate_limit_allows() if (session_limit_ok and ip_limit_ok) else True
+    )
+    alerts_allowed = session_limit_ok and ip_limit_ok and global_limit_ok
 
-    # --- Persist (with failure protection) ---
+    # --- Persist — always, with failure protection.  Rate limiting only
+    # applies to operator alerts; suppressing audit records would blind
+    # exactly the sessions escalating hard enough to hit the limit. ---
     try:
         log_escalation(
             session_id, risk_score, triggers, category,
@@ -210,6 +352,7 @@ def escalate(
         logger.exception("Failed to write escalation to DB for session=%s", session_id)
         return {
             "escalated": True,
+            "alerted": False,
             "reason": "logged_with_db_error",
             "session_id": session_id,
             "category": category,
@@ -217,19 +360,45 @@ def escalate(
             "triggers": list(triggers),
         }
 
+    if not alerts_allowed:
+        if not session_limit_ok:
+            reason = "logged_alerts_rate_limited"
+            limit_label = "session"
+        elif not ip_limit_ok:
+            reason = "logged_alerts_ip_rate_limited"
+            limit_label = "ip"
+        else:
+            reason = "logged_alerts_globally_rate_limited"
+            limit_label = "GLOBAL"
+        logger.warning(
+            "[RATE-LIMITED:%s] session=%s  client_ip=%s  category=%s  risk_score=%.2f — "
+            "event logged, alerts suppressed (quota exhausted)",
+            limit_label, session_id, client_ip or "unknown", category, risk_score,
+        )
+        return {
+            "escalated": True,
+            "alerted": False,
+            "reason": reason,
+            "session_id": session_id,
+            "category": category,
+            "risk_score": risk_score,
+            "triggers": list(triggers),
+            "stage_reached": stage_reached,
+        }
+
     # --- Highly-visible structured log ---
-    category_emoji = "🆘" if category == "self_harm" else "⚠️"
+    category_label = "[SELF-HARM]" if category == "self_harm" else "[ALERT]"
     border = "!" * 60
     logger.critical(
         "\n%s\n"
-        "!!  %s CRITICAL SAFETY ALERT\n"
+        "!!  CRITICAL SAFETY ALERT %s\n"
         "!!  Category     : %s\n"
         "!!  Session      : %s\n"
         "!!  Risk Score   : %.2f\n"
         "!!  Stage Reached: %d\n"
         "!!  Triggers     : %s\n"
         "%s",
-        border, category_emoji, category, session_id,
+        border, category_label, category, session_id,
         risk_score, stage_reached, triggers, border,
     )
 
@@ -238,6 +407,7 @@ def escalate(
 
     return {
         "escalated": True,
+        "alerted": True,
         "reason": "logged",
         "session_id": session_id,
         "category": category,
@@ -260,8 +430,8 @@ def _fire_webhooks(
         has_any = any(
             webhooks.get(k)
             for k in ("slack_url", "discord_url", "pagerduty_routing_key",
-                       "teams_url", "email_to")
-        )
+                       "teams_url")
+        ) or bool((webhooks.get("email") or {}).get("to"))
         if not has_any:
             return
 

@@ -2,11 +2,14 @@
 
 ## Supported Versions
 
+v0.5.6 is the first stable release; everything before it was published as
+a pre-release and is not supported.
+
 | Version | Supported |
 |---------|-----------|
-| 0.4.x   | ✅ Yes    |
-| 0.3.x   | ⚠️ Critical fixes only |
-| < 0.3   | ❌ No     |
+| 0.6.x | Yes |
+| 0.5.6 - 0.5.7 | Critical fixes only |
+| < 0.5.6 | No (pre-releases) |
 
 ## Reporting a Vulnerability
 
@@ -51,3 +54,11 @@ The following are in-scope for security reports:
 ## Disclosure Policy
 
 We follow **coordinated disclosure**. Please allow us a reasonable window (typically 30 days) to address the vulnerability before public disclosure. We will work with you on a timeline.
+
+## Logging & Data-Exposure Hardening
+
+As of v0.5.5:
+
+- Webhook logs contain only the scheme and host of webhook URLs — never the path, query, or fragment, which carry routing tokens for Slack/Discord/Teams.
+- Webhook error logs record HTTP status and response length only; response bodies are logged exclusively at `DEBUG` level.
+- The reverse proxy never returns raw upstream response bodies to clients; non-JSON upstream responses produce a generic error message, with the body available to operators at `DEBUG` level.

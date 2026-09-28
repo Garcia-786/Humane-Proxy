@@ -10,7 +10,7 @@
 /pyproject.toml                     @Vishisht16
 /server.json                        @Vishisht16
 /glama.json                         @Vishisht16
-/Dockerfile                         @Vishisht16
+/deploy/                            @Vishisht16
 /CHANGELOG.md                       @Vishisht16
 /humane_proxy.yaml                  @Vishisht16
 /.github/                           @Vishisht16

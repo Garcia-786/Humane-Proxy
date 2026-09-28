@@ -20,11 +20,24 @@ Requires::
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
+from humane_proxy._json import dumps_pretty
+
 logger = logging.getLogger("humane_proxy.integrations.autogen")
+
+_proxy = None
+
+
+def _get_proxy():
+    """Return the process-level HumaneProxy singleton (avoids rebuilding
+    the whole pipeline — and Stage-2 setup — on every tool call)."""
+    global _proxy
+    if _proxy is None:
+        from humane_proxy import HumaneProxy
+        _proxy = HumaneProxy()
+    return _proxy
 
 
 # ---------------------------------------------------------------------------
@@ -43,11 +56,8 @@ def check_message_safety(message: str, session_id: str = "autogen-default") -> s
     Returns:
         JSON string with safety verdict, category, score, and triggers.
     """
-    from humane_proxy import HumaneProxy
-
-    proxy = HumaneProxy()
-    result = proxy.check(message, session_id=session_id)
-    return json.dumps(result, indent=2)
+    result = _get_proxy().check(message, session_id=session_id)
+    return dumps_pretty(result)
 
 
 def get_session_risk(session_id: str) -> str:
@@ -61,7 +71,7 @@ def get_session_risk(session_id: str) -> str:
     """
     from humane_proxy.risk.trajectory import snapshot, to_dict
 
-    return json.dumps(to_dict(snapshot(session_id)), indent=2)
+    return dumps_pretty(to_dict(snapshot(session_id)))
 
 
 def list_recent_escalations(limit: int = 20, category: str = "") -> str:
@@ -83,7 +93,7 @@ def list_recent_escalations(limit: int = 20, category: str = "") -> str:
         category=category,
         limit=limit,
     )
-    return json.dumps(results, indent=2, default=str)
+    return dumps_pretty(results)
 
 
 def get_safety_functions() -> list[dict[str, Any]]:

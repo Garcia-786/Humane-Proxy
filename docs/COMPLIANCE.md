@@ -29,11 +29,11 @@ User Message → [Your Application] → [HumaneProxy Pipeline] → [Upstream LLM
 
 | Requirement | Status | Notes |
 |---|---|---|
-| **Data at rest** | ✅ No PHI stored by default | Messages are SHA-256 hashed before persistence. Raw text is never stored unless the operator explicitly enables `privacy.store_message_text: true`. |
-| **Data in transit** | ✅ Operator-controlled | HumaneProxy runs locally. TLS configuration for upstream connections is the operator's responsibility. |
-| **Access controls** | ✅ Admin API secured | The `/admin` API requires a Bearer token (`HUMANE_PROXY_ADMIN_KEY`). |
-| **Audit logging** | ✅ Built-in | All escalation events are logged with session ID, category, score, stage, and timestamp. |
-| **BAA requirement** | ⚠️ Conditional | No BAA is needed for Stages 1–2 (fully local). If Stage 3 is enabled, a BAA with the LLM provider (e.g., OpenAI) may be required if processing PHI. |
+| **Data at rest** | Yes — No PHI stored by default | Messages are SHA-256 hashed before persistence. Raw text is never stored unless the operator explicitly enables `privacy.store_message_text: true`. |
+| **Data in transit** | Yes — Operator-controlled | HumaneProxy runs locally. TLS configuration for upstream connections is the operator's responsibility. |
+| **Access controls** | Yes — Admin API secured | The `/admin` API requires a Bearer token (`HUMANE_PROXY_ADMIN_KEY`). |
+| **Audit logging** | Yes — Built-in | All escalation events are logged with session ID, category, score, stage, and timestamp. |
+| **BAA requirement** | Conditional — Conditional | No BAA is needed for Stages 1–2 (fully local). If Stage 3 is enabled, a BAA with the LLM provider (e.g., OpenAI) may be required if processing PHI. |
 
 ### What the Operator Must Do
 
@@ -50,13 +50,13 @@ User Message → [Your Application] → [HumaneProxy Pipeline] → [Upstream LLM
 
 | Requirement | Status | Notes |
 |---|---|---|
-| **Data minimisation** | ✅ By design | Only SHA-256 hashes, scores, and categories are stored. No PII is persisted by default. |
-| **Right to erasure** | ✅ Built-in | `DELETE /admin/sessions/{id}` removes all records for a session. Also available via CLI. |
-| **Purpose limitation** | ✅ Clear scope | Data is processed solely for safety classification. No profiling, analytics, or marketing use. |
-| **Data portability** | ✅ CSV export | `GET /admin/escalations/export` provides full CSV export of escalation data. |
-| **Consent** | ⚠️ Operator-managed | HumaneProxy does not collect consent. The operator's application must obtain appropriate consent for message processing. |
-| **Data residency** | ✅ Self-hosted | All data stays within the operator's infrastructure (Stages 1–2). Stage 3 routing is operator-configured. |
-| **Cross-border transfers** | ⚠️ Stage 3 only | If Stage 3 routes to a US-based LLM provider, standard contractual clauses or adequacy decisions may apply. |
+| **Data minimisation** | Yes — By design | Only SHA-256 hashes, scores, and categories are stored. No PII is persisted by default. |
+| **Right to erasure** | Yes — Built-in | `DELETE /admin/sessions/{id}` removes all records for a session. Also available via CLI. |
+| **Purpose limitation** | Yes — Clear scope | Data is processed solely for safety classification. No profiling, analytics, or marketing use. |
+| **Data portability** | Yes — CSV export | `GET /admin/escalations/export` provides full CSV export of escalation data. |
+| **Consent** | Conditional — Operator-managed | HumaneProxy does not collect consent. The operator's application must obtain appropriate consent for message processing. |
+| **Data residency** | Yes — Self-hosted | All data stays within the operator's infrastructure (Stages 1–2). Stage 3 routing is operator-configured. |
+| **Cross-border transfers** | Conditional — Stage 3 only | If Stage 3 routes to a US-based LLM provider, standard contractual clauses or adequacy decisions may apply. |
 
 ### What the Operator Must Do
 
@@ -83,12 +83,12 @@ HumaneProxy's architecture supports SOC 2 controls:
 
 | Aspect | HumaneProxy Default | With Stage 3 Enabled |
 |---|---|---|
-| **Data leaves infrastructure?** | ❌ No | ✅ Yes (to LLM provider) |
-| **PII stored?** | ❌ No (SHA-256 only) | ❌ No (SHA-256 only) |
-| **BAA required?** | ❌ No | ⚠️ Possibly (depends on data type) |
-| **GDPR-compatible?** | ✅ Yes | ✅ Yes (with operator safeguards) |
-| **Right to erasure?** | ✅ Built-in API | ✅ Built-in API |
-| **Audit trail?** | ✅ SQLite + webhooks | ✅ SQLite + webhooks |
+| **Data leaves infrastructure?** | No | Yes (to LLM provider) |
+| **PII stored?** | No (SHA-256 only) | No (SHA-256 only) |
+| **BAA required?** | No | Possibly (depends on data type) |
+| **GDPR-compatible?** | Yes | Yes (with operator safeguards) |
+| **Right to erasure?** | Yes — Built-in API | Yes — Built-in API |
+| **Audit trail?** | Yes — SQLite + webhooks | Yes — SQLite + webhooks |
 
 ---
 

@@ -38,6 +38,17 @@ from humane_proxy.classifiers.models import (
 
 logger = logging.getLogger("humane_proxy.pipeline")
 
+
+def stage2_backend_available() -> bool:
+    """Return True if any embedding backend (ONNX or ST) is importable.
+
+    Checks module-level availability flags only — no model is loaded.
+    """
+    from humane_proxy.classifiers import onnx_encoder
+    from humane_proxy.classifiers import embedding_classifier as ec
+
+    return onnx_encoder.ONNX_AVAILABLE or ec._ML_AVAILABLE
+
 _stage3_warning_shown = False
 
 
@@ -59,14 +70,38 @@ class SafetyPipeline:
         self._config = config
         pipeline_cfg = config.get("pipeline", {})
         safety_cfg = config.get("safety", {})
+        if not isinstance(pipeline_cfg, dict):
+            logger.warning("Invalid 'pipeline' config section %r — using defaults", pipeline_cfg)
+            pipeline_cfg = {}
+        if not isinstance(safety_cfg, dict):
+            logger.warning("Invalid 'safety' config section %r — using defaults", safety_cfg)
+            safety_cfg = {}
 
-        self.enabled_stages: list[int] = pipeline_cfg.get("enabled_stages", [1])
-        self.stage1_ceiling: float = pipeline_cfg.get("stage1_ceiling", 0.3)
-        self.stage2_ceiling: float = pipeline_cfg.get("stage2_ceiling", 0.4)
-        self.spike_boost: float = safety_cfg.get("spike_boost", 0.25)
-        self.risk_threshold: float = safety_cfg.get("risk_threshold", 0.7)
-        self.store_message_text: bool = config.get("privacy", {}).get(
-            "store_message_text", False
+        # Malformed values fall back to safe defaults instead of raising —
+        # a broken config must never take the safety pipeline down.
+        self.enabled_stages: list[int] = self._resolve_stages(
+            pipeline_cfg.get("enabled_stages", "auto")
+        )
+        self.stage1_ceiling: float = self._as_float(
+            pipeline_cfg.get("stage1_ceiling", 0.3), 0.3, "pipeline.stage1_ceiling"
+        )
+        self.stage2_ceiling: float = self._as_float(
+            pipeline_cfg.get("stage2_ceiling", 0.4), 0.4, "pipeline.stage2_ceiling"
+        )
+        # Fail-safe default: when Stage 3 is enabled, it evaluates messages
+        # Stages 1-2 marked safe (full safety net). Set false to restore the
+        # cost-saving early exit for paid Stage-3 providers.
+        self.stage3_on_safe: bool = bool(
+            pipeline_cfg.get("stage3_on_safe", True)
+        )
+        self.spike_boost: float = self._as_float(
+            safety_cfg.get("spike_boost", 0.25), 0.25, "safety.spike_boost"
+        )
+        self.risk_threshold: float = self._as_float(
+            safety_cfg.get("risk_threshold", 0.5), 0.5, "safety.risk_threshold"
+        )
+        self.store_message_text: bool = bool(
+            config.get("privacy", {}).get("store_message_text", False)
         )
 
         # Stage 2: embedding classifier.
@@ -84,6 +119,59 @@ class SafetyPipeline:
     # ------------------------------------------------------------------
     # Initialisation helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_stages(raw: Any) -> list[int]:
+        """Resolve ``enabled_stages``, expanding the ``"auto"`` default.
+
+        ``"auto"`` enables Stage 1 always, plus Stage 2 when an embedding
+        backend (ONNX or sentence-transformers) is importable — so
+        ``pip install humane-proxy[onnx]`` yields full 1+2 protection with
+        zero config. Stage 3 stays opt-in (it carries per-call cost and
+        latency); the CLI nudges operators to enable it. Any explicit
+        list is passed through unchanged.
+        """
+        if isinstance(raw, str) and raw.strip().lower() == "auto":
+            stages = [1]
+            if stage2_backend_available():
+                stages.append(2)
+            logger.info("pipeline.enabled_stages: auto -> %s", stages)
+            return stages
+        return SafetyPipeline._validate_stages(raw)
+
+    @staticmethod
+    def _validate_stages(raw: Any) -> list[int]:
+        """Sanitize ``enabled_stages`` — non-list values fall back to ``[1]``.
+
+        List/tuple input is filtered to the valid stage numbers (1-3),
+        deduplicated, order-preserved; an explicitly empty list stays empty
+        (it means "classify nothing", which is allowed).
+        """
+        if isinstance(raw, (list, tuple)):
+            stages: list[int] = []
+            for item in raw:
+                try:
+                    num = int(item)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring invalid stage %r in enabled_stages", item)
+                    continue
+                if num in (1, 2, 3) and num not in stages:
+                    stages.append(num)
+            return stages
+        logger.warning(
+            "Invalid pipeline.enabled_stages=%r (expected a list) — falling back to [1]",
+            raw,
+        )
+        return [1]
+
+    @staticmethod
+    def _as_float(raw: Any, default: float, name: str) -> float:
+        """Coerce a config value to float, falling back to *default*."""
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s=%r — using default %s", name, raw, default)
+            return default
 
     def _init_stage2(self) -> None:
         """Instantiate the embedding classifier (lazy model load)."""
@@ -163,7 +251,7 @@ class SafetyPipeline:
         _stage3_warning_shown = True
         logger.warning(
             "\n"
-            "⚠️  Stage-3 classification is DISABLED (no API key detected).\n"
+            "Stage-3 classification is DISABLED (no API key detected).\n"
             "    For stronger protection, set up a Stage-3 provider:\n"
             "\n"
             "    Option A — OpenAI Moderation (free with any OpenAI key):\n"
@@ -187,7 +275,7 @@ class SafetyPipeline:
     ) -> PipelineResult:
         """Run the full async pipeline (Stages 1 + 2 + 3)."""
         # Stage 1 — Heuristics (always).
-        result = self._run_stage1(text)
+        result = self._run_stage1_safe(text)
 
         # Early exit: clear dangerous (self_harm).
         if result.category == "self_harm":
@@ -206,19 +294,31 @@ class SafetyPipeline:
         ):
             return self._finalize(result, session_id, text)
 
+        stage3_enabled = 3 in self.enabled_stages and self._stage3 is not None
+
         # Stage 2 — Embeddings (if enabled).
         if stage2_enabled:
-            s2 = self._stage2.classify(text)
+            s2 = self._run_stage2_safe(text)
             result = self._combine(result, s2)
 
             # Early exit after Stage 2.
             if result.category == "self_harm":
                 return self._finalize(result, session_id, text)
-            if result.score <= self.stage2_ceiling and result.category == "safe":
+            # Short-circuit "safe" only when no Stage-3 safety net remains.
+            # Embeddings score much criminal content near zero (it is
+            # semantically far from the anchors), so skipping Stage 3 here
+            # would let exactly the prompts Stage 2 is weakest on pass
+            # unchecked. When Stage 3 is enabled, safe messages flow to it
+            # unless the operator opts into the cost-saving early exit.
+            if (
+                result.score <= self.stage2_ceiling
+                and result.category == "safe"
+                and not (stage3_enabled and self.stage3_on_safe)
+            ):
                 return self._finalize(result, session_id, text)
 
         # Stage 3 — Reasoning LLM (if enabled).
-        if 3 in self.enabled_stages and self._stage3 is not None:
+        if stage3_enabled:
             try:
                 s3 = await self._stage3.classify(text, result)
                 result = self._combine(result, s3)
@@ -237,7 +337,7 @@ class SafetyPipeline:
         self, text: str, session_id: str
     ) -> PipelineResult:
         """Run the synchronous pipeline (Stages 1 + 2 only — no async)."""
-        result = self._run_stage1(text)
+        result = self._run_stage1_safe(text)
 
         if result.category == "self_harm":
             return self._finalize(result, session_id, text)
@@ -251,16 +351,46 @@ class SafetyPipeline:
             return self._finalize(result, session_id, text)
 
         if stage2_enabled:
-            s2 = self._stage2.classify(text)
+            s2 = self._run_stage2_safe(text)
             result = self._combine(result, s2)
 
         return self._finalize(result, session_id, text)
+
+    # ------------------------------------------------------------------
+    # Fail-open-loudly wrappers
+    #
+    # Policy: a classifier that raises must never take down the request.
+    # HumaneProxy fails OPEN (treats the stage as neutral/safe) so a
+    # corrupt model or provider outage cannot block every user — but it
+    # logs the failure LOUDLY (logger.exception) and tags the result, so
+    # the degradation is visible in logs and the audit trail rather than
+    # silent. See docs/PIPELINE.md ("Failure policy").
+    # ------------------------------------------------------------------
+
+    def _run_stage1_safe(self, text: str) -> ClassificationResult:
+        try:
+            return self._run_stage1(text)
+        except Exception:
+            logger.exception("Stage-1 heuristics failed — failing open (safe)")
+            return ClassificationResult(
+                category="safe", score=0.0, triggers=["stage1_error"], stage=1
+            )
+
+    def _run_stage2_safe(self, text: str) -> ClassificationResult:
+        try:
+            return self._stage2.classify(text)
+        except Exception:
+            logger.exception("Stage-2 embeddings failed — failing open (safe)")
+            return ClassificationResult(
+                category="safe", score=0.0, triggers=["stage2_error"], stage=2
+            )
 
     # ------------------------------------------------------------------
     # Stage 1 wrapper
     # ------------------------------------------------------------------
 
     @staticmethod
+    @traced_stage("stage1.heuristics")
     def _run_stage1(text: str) -> ClassificationResult:
         """Run the heuristic classifier and wrap in a ClassificationResult."""
         from humane_proxy.classifiers.heuristics import classify
@@ -340,7 +470,13 @@ class SafetyPipeline:
 
         # Self-harm threshold-aware override.
         self_harm_cfg = self._config.get("safety", {}).get("categories", {}).get("self_harm", {})
-        self_harm_threshold = self_harm_cfg.get("escalate_threshold", 0.5)
+        if not isinstance(self_harm_cfg, dict):
+            self_harm_cfg = {}
+        self_harm_threshold = self._as_float(
+            self_harm_cfg.get("escalate_threshold", 0.5),
+            0.5,
+            "safety.categories.self_harm.escalate_threshold",
+        )
 
         if result.category == "self_harm":
             if result.score >= self_harm_threshold:

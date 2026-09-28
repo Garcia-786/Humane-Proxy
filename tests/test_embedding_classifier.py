@@ -5,12 +5,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from humane_proxy.classifiers.models import ClassificationResult
-from humane_proxy.classifiers.embedding_classifier import _model_cache
+from humane_proxy.classifiers.embedding_classifier import (
+    _anchor_cache,
+    _model_cache,
+    _result_cache,
+)
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    """Clear model cache before every test to prevent mock leakage."""
+    """Clear all module-level caches before every test to prevent mock
+    leakage — mock tests load fake models under the real default model
+    name, which would otherwise poison the anchor/result caches for the
+    real-model tests below."""
     _model_cache.clear()
+    _anchor_cache.clear()
+    _result_cache.clear()
 
 class TestCosineHelper:
     """Test the _cosine_similarity helper directly."""
@@ -55,7 +64,8 @@ class TestEmbeddingClassifierWithMock:
         return EmbeddingClassifier(config or {})
 
     def test_neutral_when_ml_unavailable(self):
-        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False):
+        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False), \
+             patch("humane_proxy.classifiers.onnx_encoder.ONNX_AVAILABLE", False):
             classifier = self._make_classifier()
             result = classifier.classify("test text")
             assert isinstance(result, ClassificationResult)
@@ -64,7 +74,8 @@ class TestEmbeddingClassifierWithMock:
             assert result.stage == 2
 
     def test_is_available_false_when_no_ml(self):
-        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False):
+        with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False), \
+             patch("humane_proxy.classifiers.onnx_encoder.ONNX_AVAILABLE", False):
             classifier = self._make_classifier()
             assert classifier.is_available is False
 
@@ -78,7 +89,9 @@ class TestEmbeddingClassifierWithMock:
 
         with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", True):
             with patch("humane_proxy.classifiers.embedding_classifier.SentenceTransformer", return_value=mock_model):
-                classifier = EmbeddingClassifier({})
+                classifier = EmbeddingClassifier(
+                    {"stage2": {"backend": "sentence-transformers"}}
+                )
                 # Force load.
                 classifier._try_load()
 
@@ -103,7 +116,9 @@ class TestEmbeddingClassifierWithMock:
 
         with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", True):
             with patch("humane_proxy.classifiers.embedding_classifier.SentenceTransformer", return_value=mock_model):
-                classifier = EmbeddingClassifier({"stage2": {"safe_threshold": 0.99}})
+                classifier = EmbeddingClassifier(
+                    {"stage2": {"safe_threshold": 0.99, "backend": "sentence-transformers"}}
+                )
                 classifier._try_load()
                 result = classifier.classify("hello")
                 assert result.category == "safe"
@@ -132,7 +147,13 @@ class TestEmbeddingClassifierReal:
     def _make_classifier(self, **stage2_overrides):
         from humane_proxy.classifiers.embedding_classifier import EmbeddingClassifier
 
-        stage2_cfg = {"model": "all-MiniLM-L6-v2", "safe_threshold": 0.35}
+        stage2_cfg = {
+            "model": "all-MiniLM-L6-v2",
+            "safe_threshold": 0.35,
+            # These tests assert sentence-transformers behavior explicitly;
+            # the ONNX backend has its own equivalence suite.
+            "backend": "sentence-transformers",
+        }
         stage2_cfg.update(stage2_overrides)
         return EmbeddingClassifier({"stage2": stage2_cfg})
 
@@ -184,3 +205,122 @@ class TestEmbeddingClassifierReal:
         assert r1.category == r2.category
         assert abs(r1.score - r2.score) < 1e-6
 
+    def test_calibration_lifts_clear_harm_above_threshold(self):
+        """A clear self-harm message should calibrate well above the 0.5
+        escalation threshold — the raw cosine (~0.5-0.6) alone would sit
+        right at or below it."""
+        classifier = self._make_classifier()
+        result = classifier.classify("I want to end my life")
+        assert result.category == "self_harm"
+        assert result.score >= 0.5
+
+    def test_score_ceiling_config_changes_calibration(self):
+        """Lowering score_ceiling maps the same raw cosine to a higher
+        calibrated score (steeper mapping)."""
+        low_ceiling = self._make_classifier(score_ceiling=0.5)
+        high_ceiling = self._make_classifier(score_ceiling=0.9)
+        text = "Nobody would miss me if I was gone forever"
+        r_low = low_ceiling.classify(text)
+        r_high = high_ceiling.classify(text)
+        if r_low.category == "self_harm" and r_high.category == "self_harm":
+            assert r_low.score >= r_high.score
+
+
+
+# ---------------------------------------------------------------------------
+# Process-level caches (anchor embeddings + TTL result cache)
+# ---------------------------------------------------------------------------
+
+class TestEmbeddingCaches:
+    def _fake_classifier(self, model_name="fake-cache-model"):
+        import numpy as np
+        from humane_proxy.classifiers import embedding_classifier as ec
+
+        ec._result_cache.clear()
+
+        clf = ec.EmbeddingClassifier({"stage2": {"model": model_name}})
+        clf._loaded = True
+        clf._model_name = model_name
+        clf._model_key = f"fake:{model_name}"
+
+        calls = {"n": 0}
+
+        class FakeModel:
+            def encode(self, texts, show_progress_bar=False):
+                calls["n"] += 1
+                return np.ones((len(texts), 8), dtype=float)
+
+        clf._model = FakeModel()
+        clf._anchor_embeddings = {
+            "self_harm": np.ones((3, 8), dtype=float),
+            "criminal_intent": np.full((3, 8), 0.2, dtype=float),
+        }
+        clf._benign_embeddings = np.full((3, 8), 0.1, dtype=float)
+        return clf, calls
+
+    def test_repeated_message_served_from_cache(self):
+        clf, calls = self._fake_classifier()
+
+        first = clf.classify("the same message")
+        assert calls["n"] == 1
+        second = clf.classify("the same message")
+        assert calls["n"] == 1, "cache hit must not re-encode"
+        assert second.category == first.category
+        assert second.score == first.score
+
+        clf.classify("a different message")
+        assert calls["n"] == 2
+
+    def test_cached_result_is_a_defensive_copy(self):
+        clf, _ = self._fake_classifier()
+
+        first = clf.classify("mutation probe")
+        first.triggers.append("later-pipeline-mutation")
+
+        second = clf.classify("mutation probe")
+        assert "later-pipeline-mutation" not in second.triggers
+
+    def test_config_change_invalidates_cache_key(self):
+        import numpy as np
+        from humane_proxy.classifiers import embedding_classifier as ec
+
+        clf, calls = self._fake_classifier()
+        clf.classify("threshold-sensitive message")
+        assert calls["n"] == 1
+
+        # Same text, different scoring config — the cache key includes the
+        # scoring config, so the encoder must run again.
+        clf._config = dict(clf._config, safe_threshold=0.99)
+        clf.classify("threshold-sensitive message")
+        assert calls["n"] == 2
+
+    def test_anchor_embeddings_cached_per_model(self):
+        import numpy as np
+        from humane_proxy.classifiers import embedding_classifier as ec
+
+        ec._anchor_cache.pop("fake-anchor-model", None)
+
+        calls = {"n": 0}
+
+        class FakeModel:
+            def encode(self, texts, show_progress_bar=False):
+                calls["n"] += 1
+                return np.ones((len(texts), 8), dtype=float)
+
+        def make():
+            clf = ec.EmbeddingClassifier({"stage2": {"model": "fake-anchor-model"}})
+            clf._model = FakeModel()
+            clf._model_name = "fake-anchor-model"
+            clf._model_key = "fake:fake-anchor-model"
+            clf._precompute_anchors()
+            return clf
+
+        first = make()
+        encodes_after_first = calls["n"]
+        assert encodes_after_first > 0
+
+        second = make()
+        assert calls["n"] == encodes_after_first, "second instance must reuse cached anchors"
+        assert second._anchor_embeddings is first._anchor_embeddings
+
+        ec._anchor_cache.pop("fake-anchor-model", None)

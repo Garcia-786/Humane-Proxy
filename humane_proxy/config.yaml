@@ -7,15 +7,9 @@ server:
   port: 8000
   reload: false
 
-safety:
-  # Risk score threshold (0.0 - 1.0). Scores at or above this trigger escalation.
-  risk_threshold: 0.7
-
-  # Score boost applied when a trajectory spike is detected.
-  spike_boost: 0.25
-
-  # Maximum number of messages to retain per session for trajectory analysis.
-  session_history_limit: 20
+# NOTE: `safety` and `escalation` are defined once each, further below.
+# YAML silently keeps only the LAST duplicate top-level key, so never add
+# a second block for an existing key.
 
 heuristics:
   # Self-harm keywords — phrases that indicate self-harm ideation.
@@ -35,6 +29,10 @@ heuristics:
     - "hurt myself"
     - "self harm"
     - "self-harm"
+    - "kill yourself"
+    - "killing myself"
+    - "starve myself"
+    - "make myself throw up"
 
   # Criminal intent keywords — phrases indicating harmful criminal plans.
   criminal_keywords:
@@ -48,6 +46,7 @@ heuristics:
     - "how to synthesize fentanyl"
     - "how to cook meth"
     - "child pornography"
+    - "child porn"
     - "explosive device"
     - "how to make ricin"
 
@@ -61,7 +60,8 @@ heuristics:
   intent_pattern_score: 0.7
 
   # Context-reducing phrases that lower false positives.
-  # When these appear alongside a single trigger, the score is reduced.
+  # Applied when all triggers stem from a single expression in the message
+  # (overlapping matches); separate harmful expressions disable reduction.
   context_reducers:
     - "laughing"
     - "of laughter"
@@ -109,35 +109,80 @@ trajectory:
   #   0   → disable decay entirely (plain unweighted mean)
   decay_half_life_hours: 24.0
 
-escalation:
-  # Per-session rate limiting for escalation logging.
-  rate_limit_max: 3
-  rate_limit_window_hours: 1
+  # Where session trajectory state lives:
+  #   "memory" — per-process dicts (default). With multiple uvicorn
+  #              workers, each worker tracks sessions independently.
+  #   "redis"  — shared Redis sorted sets with an atomic Lua
+  #              read-append-trim, giving all workers one consistent
+  #              view. Requires: pip install humane-proxy[redis].
+  #              Falls back to "memory" (with a logged warning) if the
+  #              redis package is missing or the server is unreachable.
+  backend: "memory"
+  redis:
+    # Connection URL. Empty -> reuse storage.redis.url (share the
+    # escalation store's Redis instance).
+    url: ""
+    key_prefix: "humane_proxy:traj:"
+    # Per-session TTL in seconds; sessions idle longer than this expire
+    # automatically (the Redis analogue of in-memory session eviction).
+    # 0 -> auto: 2x decay half-life (min 1 hour), or 7 days when decay
+    # is disabled.
+    ttl_seconds: 0
 
-  # Webhook URLs — leave empty to disable.
-  webhooks:
-    slack_url: ""
-    discord_url: ""
-    pagerduty_routing_key: ""
+# Fail-safe setup nudges: print [WARN]/[INFO] lines at startup (hp start,
+# mcp-serve) when a stronger protection stage is available but not enabled
+# — e.g. an embedding backend is installed but Stage 2 is off, or a
+# Stage-3 provider key is present but Stage 3 is not enabled. Set false to
+# silence these nudges (they never block startup).
+startup_warnings: true
 
 # ---------------------------------------------------------------------------
 # 3-Stage Cascade Pipeline (Phase 2)
 # ---------------------------------------------------------------------------
 
 pipeline:
-  # Which stages to enable. [1] = heuristics only, [1,2] = +embeddings,
-  # [1,2,3] = full pipeline with reasoning LLM.
-  enabled_stages: [1]
+  # Which stages to enable.
+  #   "auto"  = Stage 1 always + Stage 2 when an embedding backend is
+  #             installed ([onnx] or [ml]); Stage 3 stays opt-in (default).
+  #   [1]     = heuristics only.
+  #   [1,2]   = + embeddings.
+  #   [1,2,3] = full pipeline with the reasoning LLM.
+  # With "auto", `pip install humane-proxy[onnx]` gives 1+2 with no config.
+  enabled_stages: "auto"
 
   # Early-exit ceilings: if the combined score is below this after the
   # given stage AND category is "safe", skip remaining stages.
   stage1_ceiling: 0.3
   stage2_ceiling: 0.4
 
+  # Fail-safe safety net: when Stage 3 is enabled, run it on messages that
+  # Stages 1-2 marked safe. Embeddings score much criminal content near
+  # zero, so this is where Stage 3 earns its keep. The default Stage-3
+  # provider (OpenAI Moderation) is free, so this costs nothing there; set
+  # false to restore the cost-saving early exit when using a paid provider.
+  stage3_on_safe: true
+
 stage2:
-  # Sentence-transformer model name (local).
-  # Requires: pip install humane-proxy[ml]
+  # Embedding model name (resolved against the sentence-transformers
+  # namespace on Hugging Face when no "/" is present).
   model: "all-MiniLM-L6-v2"
+
+  # Calibration ceiling: raw cosine similarity in [safe_threshold,
+  # score_ceiling] maps linearly onto [0, 1], so the escalation
+  # thresholds (which were tuned to Stage-1 keyword scores) are
+  # reachable by embeddings. Raw cosine for clearly harmful text tops
+  # out around 0.55-0.65 with MiniLM-class models.
+  score_ceiling: 0.65
+
+  # Inference backend:
+  #   "auto"                  — prefer ONNX Runtime when installed, else
+  #                             sentence-transformers (default)
+  #   "onnx"                  — ONNX Runtime only; no PyTorch needed.
+  #                             Requires: pip install humane-proxy[onnx]
+  #   "sentence-transformers" — PyTorch path.
+  #                             Requires: pip install humane-proxy[ml]
+  # Both backends produce numerically equivalent embeddings.
+  backend: "auto"
 
   # Cosine similarity threshold: scores below this are "safe".
   safe_threshold: 0.35
@@ -159,14 +204,27 @@ stage3:
 
   openai_moderation:
     api_url: "https://api.openai.com/v1/moderations"
+    # omni-moderation-* emits illicit / illicit-violent categories that the
+    # older text-moderation-* models lack (needed for criminal-intent).
+    model: "omni-moderation-latest"
 
   llamaguard:
     api_url: "https://api.groq.com/openai/v1/chat/completions"
     model: "meta-llama/llama-guard-3-8b"
 
+  # Any OpenAI-compatible chat endpoint (OpenAI, Groq, Together, a local
+  # server). The key comes from OPENAI_API_KEY, else LLM_API_KEY.
   openai_chat:
     api_url: "https://api.openai.com/v1/chat/completions"
     model: "gpt-4o-mini"
+    # Tokens for the model's reply. Reasoning models (e.g. Groq's
+    # gpt-oss-safeguard) emit chain-of-thought before the JSON verdict and
+    # need a generous budget — too small truncates the answer.
+    max_tokens: 1024
+    # JSON mode forces the whole reply to be one JSON value, which reasoning
+    # models break. Off by default (a tolerant parser extracts the JSON from
+    # free-form text). Enable for plain chat models that support it.
+    json_mode: false
 
 privacy:
   # If false (default), only a SHA-256 hash of the message is stored
@@ -178,7 +236,12 @@ privacy:
 # ---------------------------------------------------------------------------
 
 safety:
-  risk_threshold: 0.7
+  # Criminal-intent escalation threshold. Scores at or above this trigger
+  # escalation. Calibrated for the [0, 1] scale shared by Stage-1 keyword
+  # scores and calibrated Stage-2 embedding scores (see stage2.score_ceiling).
+  # 0.5 is the fail-safe default; raise toward 0.7 to reduce false positives
+  # at the cost of recall.
+  risk_threshold: 0.5
   spike_boost: 0.25
   session_history_limit: 20
 
@@ -243,8 +306,27 @@ admin:
 # ---------------------------------------------------------------------------
 
 escalation:
+  # Per-session ALERT rate limiting. Every escalation is always written to
+  # the audit log; this quota only caps operator notifications (webhooks,
+  # email, CRITICAL log banner) per session per window.
   rate_limit_max: 3
   rate_limit_window_hours: 1
+
+  # Per-IP ALERT rate-limit layer, checked on every request. session_id is
+  # caller-supplied and unauthenticated, so the per-session quota above can
+  # be bypassed by rotating session_id on every request. This layer is
+  # keyed on the real TCP peer address instead (not attacker-controlled),
+  # so rotating session_id no longer helps. Set ip_rate_limit_max to 0 to
+  # disable it.
+  ip_rate_limit_max: 10
+  ip_rate_limit_window_seconds: 60
+
+  # Global ALERT rate-limit — outer ceiling, last line of defense. Keyed on
+  # nothing (counts every alert regardless of session_id or IP), so it also
+  # catches the distributed case (many real IPs) the per-IP layer alone
+  # can't stop. Set global_rate_limit_max to 0 to disable it.
+  global_rate_limit_max: 100
+  global_rate_limit_window_seconds: 60
 
   webhooks:
     slack_url: ""
@@ -265,4 +347,3 @@ escalation:
       from: ""
       # List of recipient addresses
       to: []
-

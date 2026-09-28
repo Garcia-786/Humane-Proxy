@@ -1,7 +1,0 @@
-# Core runtime dependencies
-fastapi>=0.109.1
-httpx>=0.24.0
-pyyaml>=6.0
-uvicorn>=0.22.0
-click>=8.0
-rich>=13.0.0

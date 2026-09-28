@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from humane_proxy import __version__
 from humane_proxy.telemetry import setup_telemetry
 from humane_proxy.escalation.local_db import init_db
 from humane_proxy.escalation.router import escalate, get_self_harm_response
@@ -19,8 +20,26 @@ from json import JSONDecodeError
 
 logger = logging.getLogger("humane_proxy")
 
-LLM_API_KEY: str = os.environ.get("LLM_API_KEY", "")
-LLM_API_URL: str = os.environ.get("LLM_API_URL", "")
+
+def _select_response_class() -> type[JSONResponse]:
+    """Pick the fastest available JSON response class.
+
+    A local subclass is used instead of fastapi.responses.ORJSONResponse,
+    which is deprecated in current FastAPI releases.
+    """
+    from humane_proxy._json import ORJSON_AVAILABLE
+    if ORJSON_AVAILABLE:
+        import orjson
+
+        class _OrjsonResponse(JSONResponse):
+            def render(self, content: Any) -> bytes:
+                return orjson.dumps(content)
+
+        return _OrjsonResponse
+    return JSONResponse
+
+
+_Response = _select_response_class()
 
 _pipeline = None
 
@@ -54,6 +73,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        # Close the shared upstream HTTP connection pool.
+        from humane_proxy.http_client import aclose
+        await aclose()
+
         # Flush and shut down the OTel tracer provider cleanly on exit.
         try:
             from opentelemetry import trace
@@ -66,17 +89,26 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="HumaneProxy",
-    version="0.4.0",
+    version=__version__,
     description="Lightweight AI safety middleware that protects humans.",
     lifespan=_lifespan,
 )
 
 
+def _client_ip(request: Request) -> str:
+    """Return the raw TCP peer address for this connection.
+
+    Intentionally does NOT trust X-Forwarded-For / X-Real-IP headers — those
+    are attacker-controlled unless a trusted reverse proxy is guaranteed to
+    overwrite them, which this app doesn't assume. ``request.client.host``
+    is the actual TCP peer and can't be spoofed via request headers/body.
+    """
+    return request.client.host if request.client else "unknown"
+
+
 def _resolve_session_id(payload: dict[str, Any], request: Request) -> str:
     """Return the session_id from the payload, falling back to the client IP."""
-    return payload.get("session_id") or (
-        request.client.host if request.client else "unknown"
-    )
+    return payload.get("session_id") or _client_ip(request)
 
 
 def _extract_last_user_message(payload: dict[str, Any]) -> str:
@@ -112,7 +144,7 @@ async def chat(request: Request) -> JSONResponse:
     try:
         payload: dict[str, Any] = await request.json()
     except (JSONDecodeError, ValueError):
-        return JSONResponse(
+        return _Response(
            status_code=400,
            content={
               "status": "error",
@@ -125,13 +157,13 @@ async def chat(request: Request) -> JSONResponse:
     user_message = _extract_last_user_message(payload)
 
     if not user_message:
-        return JSONResponse(
+        return _Response(
             status_code=400,
             content={"status": "error", "message": "No user message found in payload."},
         )
 
     pipeline = _get_pipeline()
-    result = await pipeline.classify(user_message, session_id)
+    result = await pipeline.classify(user_message, session_id=session_id)
 
     if result.should_escalate:
         cls = result.classification
@@ -144,6 +176,7 @@ async def chat(request: Request) -> JSONResponse:
             message_hash=result.message_hash,
             stage_reached=cls.stage,
             reasoning=cls.reasoning,
+            client_ip=_client_ip(request),
         )
 
         # Self-harm: return care response instead of generic flagged message.
@@ -151,7 +184,7 @@ async def chat(request: Request) -> JSONResponse:
             care = get_self_harm_response(payload)
 
             if care["mode"] == "block":
-                return JSONResponse(
+                return _Response(
                     status_code=200,
                     content={
                         "status": "care_response",
@@ -165,7 +198,7 @@ async def chat(request: Request) -> JSONResponse:
                 payload = care["payload"]
 
         else:
-            return JSONResponse(
+            return _Response(
                 status_code=200,
                 content={
                     "status": "flagged",
@@ -177,37 +210,52 @@ async def chat(request: Request) -> JSONResponse:
             )
 
     # Safe (or forward mode) — forward to upstream LLM.
-    if not LLM_API_URL:
-        return JSONResponse(
+    # Read at request time (not import time) so the vars work no matter
+    # when or how they are set — e.g. exported after the app module loads.
+    llm_api_url = os.environ.get("LLM_API_URL", "")
+    llm_api_key = os.environ.get("LLM_API_KEY", "")
+    if not llm_api_url:
+        return _Response(
             status_code=503,
             content={"status": "error", "message": "LLM_API_URL is not configured."},
         )
 
     headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Authorization": f"Bearer {llm_api_key}",
         "Content-Type": "application/json",
     }
 
     try:
-        async with httpx.AsyncClient() as client:
-            llm_response = await client.post(
-                LLM_API_URL, headers=headers, json=payload, timeout=30.0
-            )
+        # Shared pooled client — connections are reused across requests
+        # instead of a fresh TCP+TLS handshake per /chat call.
+        from humane_proxy.http_client import get_async_client
+        client = get_async_client()
+        llm_response = await client.post(
+            llm_api_url, headers=headers, json=payload, timeout=30.0
+        )
         try:
             body = llm_response.json()
         except (ValueError, TypeError):
+            # Never forward raw upstream bodies to clients — they can carry
+            # sensitive or unexpected content (issue #33).  Operators can
+            # enable DEBUG logging to inspect the payload.
+            logger.debug(
+                "Upstream non-JSON body (HTTP %d): %s",
+                llm_response.status_code, llm_response.text[:500],
+            )
             body = {
                 "status": "error",
                 "message": f"Upstream returned non-JSON (HTTP {llm_response.status_code}).",
-                "raw": llm_response.text[:500],
             }
-        return JSONResponse(status_code=llm_response.status_code, content=body)
+        return _Response(status_code=llm_response.status_code, content=body)
 
     except httpx.RequestError as exc:
-        return JSONResponse(
+        # Exception text can carry the upstream URL and internal network
+        # details — keep it in server logs, return a generic message.
+        logger.warning(
+            "Upstream LLM request failed: %s: %s", type(exc).__name__, exc
+        )
+        return _Response(
             status_code=503,
-            content={
-                "status": "error",
-                "message": f"Upstream LLM unavailable: {type(exc).__name__}: {exc}",
-            },
-        )
+            content={"status": "error", "message": "Upstream LLM unavailable."},
+        )

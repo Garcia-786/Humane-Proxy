@@ -21,6 +21,18 @@ from typing import Any, Type
 
 logger = logging.getLogger("humane_proxy.integrations.crewai")
 
+_proxy = None
+
+
+def _get_proxy():
+    """Return the process-level HumaneProxy singleton (avoids rebuilding
+    the whole pipeline — and Stage-2 setup — on every tool call)."""
+    global _proxy
+    if _proxy is None:
+        from humane_proxy import HumaneProxy
+        _proxy = HumaneProxy()
+    return _proxy
+
 
 def get_safety_tools() -> list:
     """Return HumaneProxy safety tools as CrewAI BaseTool instances.
@@ -78,12 +90,10 @@ def get_safety_tools() -> list:
         args_schema: Type[BaseModel] = CheckMessageInput
 
         def _run(self, message: str, session_id: str = "crewai-default") -> str:
-            from humane_proxy import HumaneProxy
-            import json
+            from humane_proxy._json import dumps_pretty
 
-            proxy = HumaneProxy()
-            result = proxy.check(message, session_id=session_id)
-            return json.dumps(result, indent=2)
+            result = _get_proxy().check(message, session_id=session_id)
+            return dumps_pretty(result)
 
     class GetSessionRiskTool(BaseTool):
         name: str = "get_session_risk"
@@ -95,9 +105,9 @@ def get_safety_tools() -> list:
 
         def _run(self, session_id: str) -> str:
             from humane_proxy.risk.trajectory import snapshot, to_dict
-            import json
+            from humane_proxy._json import dumps_pretty
 
-            return json.dumps(to_dict(snapshot(session_id)), indent=2)
+            return dumps_pretty(to_dict(snapshot(session_id)))
 
     class ListEscalationsTool(BaseTool):
         name: str = "list_recent_escalations"
@@ -107,7 +117,7 @@ def get_safety_tools() -> list:
         def _run(self, limit: int = 20, category: str = "") -> str:
             from humane_proxy.escalation.query import normalize_escalation_query
             from humane_proxy.storage.factory import get_store
-            import json
+            from humane_proxy._json import dumps_pretty
 
             limit, category = normalize_escalation_query(limit, category)
             store = get_store()
@@ -115,7 +125,7 @@ def get_safety_tools() -> list:
                 category=category,
                 limit=limit,
             )
-            return json.dumps(results, indent=2, default=str)
+            return dumps_pretty(results)
 
     tools = [
         CheckMessageSafetyTool(),

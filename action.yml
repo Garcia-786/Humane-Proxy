@@ -15,9 +15,9 @@ inputs:
     required: false
     default: "3.12"
   extra:
-    description: "pip install extras (e.g. 'ml' for Stage 2 embeddings). Comma-separated."
+    description: "pip install extras. Comma-separated. Defaults to 'ml' because `hp benchmark` runs stages 1+2 by default and Stage 2 silently no-ops without the sentence-transformers dependency. Pass '' for heuristics-only."
     required: false
-    default: ""
+    default: "ml"
 
 runs:
   using: "composite"

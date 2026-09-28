@@ -79,6 +79,7 @@ def _apply_env_overrides(config: dict) -> dict:
         "HUMANE_PROXY_DB_PATH": (["escalation", "db_path"], str),
         "HUMANE_PROXY_RATE_LIMIT_MAX": (["escalation", "rate_limit_max"], int),
         # Phase 2 additions:
+        "HUMANE_PROXY_STAGE2_BACKEND": (["stage2", "backend"], str),
         "HUMANE_PROXY_STAGE3_PROVIDER": (["stage3", "provider"], str),
         "HUMANE_PROXY_STAGE3_TIMEOUT": (["stage3", "timeout"], float),
         "HUMANE_PROXY_STAGE1_CEILING": (["pipeline", "stage1_ceiling"], float),
@@ -89,6 +90,7 @@ def _apply_env_overrides(config: dict) -> dict:
         "HUMANE_PROXY_REDIS_URL": (["storage", "redis", "url"], str),
         "HUMANE_PROXY_POSTGRES_DSN": (["storage", "postgres", "dsn"], str),
         "HUMANE_PROXY_DECAY_HALF_LIFE": (["trajectory", "decay_half_life_hours"], float),
+        "HUMANE_PROXY_TRAJECTORY_BACKEND": (["trajectory", "backend"], str),
         "HUMANE_PROXY_TELEMETRY_ENABLED": (["telemetry", "enabled"], bool),
     }
 

@@ -21,6 +21,18 @@ from typing import Any
 
 logger = logging.getLogger("humane_proxy.integrations.llamaindex")
 
+_proxy = None
+
+
+def _get_proxy():
+    """Return the process-level HumaneProxy singleton (avoids rebuilding
+    the whole pipeline — and Stage-2 setup — on every tool call)."""
+    global _proxy
+    if _proxy is None:
+        from humane_proxy import HumaneProxy
+        _proxy = HumaneProxy()
+    return _proxy
+
 
 def _check_message_safety(message: str, session_id: str = "llamaindex-default") -> dict:
     """Classify a message for self-harm or criminal intent.
@@ -37,10 +49,7 @@ def _check_message_safety(message: str, session_id: str = "llamaindex-default") 
     dict
         ``{"safe": bool, "category": str, "score": float, "triggers": list, ...}``
     """
-    from humane_proxy import HumaneProxy
-
-    proxy = HumaneProxy()
-    return proxy.check(message, session_id=session_id)
+    return _get_proxy().check(message, session_id=session_id)
 
 
 def _get_session_risk(session_id: str) -> dict:

@@ -26,7 +26,9 @@ def test_singleton_cache():
     with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", True), \
          patch("humane_proxy.classifiers.embedding_classifier.SentenceTransformer", return_value=mock_model) as mock_st:
 
-        clf1 = EmbeddingClassifier({"stage2": {"model": "test-singleton"}})
+        clf1 = EmbeddingClassifier(
+            {"stage2": {"model": "test-singleton", "backend": "sentence-transformers"}}
+        )
         clf1._try_load()
 
         # SentenceTransformer should have been called exactly once.
@@ -34,7 +36,9 @@ def test_singleton_cache():
         assert clf1._model is mock_model
 
         # Second instance with the same model name should reuse the cache.
-        clf2 = EmbeddingClassifier({"stage2": {"model": "test-singleton"}})
+        clf2 = EmbeddingClassifier(
+            {"stage2": {"model": "test-singleton", "backend": "sentence-transformers"}}
+        )
         clf2._try_load()
 
         assert mock_st.call_count == 1  # No additional call.
@@ -56,11 +60,15 @@ def test_singleton_cache_different_models():
     with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", True), \
          patch("humane_proxy.classifiers.embedding_classifier.SentenceTransformer", side_effect=make_model):
 
-        clf_a = EmbeddingClassifier({"stage2": {"model": "model-a"}})
+        clf_a = EmbeddingClassifier(
+            {"stage2": {"model": "model-a", "backend": "sentence-transformers"}}
+        )
         clf_a._try_load()
         assert clf_a._model is mock_a
 
-        clf_b = EmbeddingClassifier({"stage2": {"model": "model-b"}})
+        clf_b = EmbeddingClassifier(
+            {"stage2": {"model": "model-b", "backend": "sentence-transformers"}}
+        )
         clf_b._try_load()
         assert clf_b._model is mock_b
 
@@ -69,7 +77,8 @@ def test_singleton_cache_different_models():
 
 def test_ml_unavailable_returns_neutral():
     """When ML deps are missing, classify returns a safe neutral result."""
-    with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False):
+    with patch("humane_proxy.classifiers.embedding_classifier._ML_AVAILABLE", False), \
+         patch("humane_proxy.classifiers.onnx_encoder.ONNX_AVAILABLE", False):
         clf = EmbeddingClassifier({})
         result = clf.classify("any text")
         assert result.category == "safe"

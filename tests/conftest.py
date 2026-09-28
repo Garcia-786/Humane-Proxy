@@ -19,9 +19,20 @@ def _isolate_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from humane_proxy.config import reload_config
     reload_config()
 
+    # Drop the cached store singleton — otherwise every test after the first
+    # keeps using the FIRST test's temp DB and the per-test isolation above
+    # is illusory.
+    from humane_proxy.storage.factory import reset_store
+    reset_store()
+
     # Re-init DB in temp location.
     from humane_proxy.escalation.local_db import init_db
     init_db()
+
+    yield
+
+    # Don't leak a store bound to this test's (soon-deleted) tmp dir.
+    reset_store()
 
 
 @pytest.fixture()

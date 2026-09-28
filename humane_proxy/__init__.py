@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 
 # ---------------------------------------------------------------------------
 # Legacy API — keep backward compatibility with existing modules that call
@@ -30,9 +30,14 @@ _CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 
 def load_config() -> dict:
-    """Load the package-level config.yaml (legacy, used by existing modules).
+    """Load the package-level config.yaml (DEPRECATED).
 
-    New code should use :func:`humane_proxy.config.get_config` instead.
+    .. deprecated:: 0.5.2
+        Returns only the bundled package defaults — no user
+        ``humane_proxy.yaml``, no ``HUMANE_PROXY_*`` env overrides.
+        Use :func:`humane_proxy.config.get_config` instead, which returns
+        the fully merged configuration. No internal module uses this
+        anymore; it is kept only for external backward compatibility.
     """
     with open(_CONFIG_PATH, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
@@ -98,7 +103,7 @@ class HumaneProxy:
             ``{"safe": bool, "category": str, "score": float, "triggers": list,
                "stage_reached": int, ...}``
         """
-        result = self._pipeline.classify_sync(text, session_id)
+        result = self._pipeline.classify_sync(text, session_id=session_id)
         return result.to_dict()
 
     async def check_async(self, text: str, session_id: str = "programmatic") -> dict:
@@ -110,7 +115,7 @@ class HumaneProxy:
             Same as :meth:`check`, but potentially enriched with Stage-3
             reasoning and higher accuracy.
         """
-        result = await self._pipeline.classify(text, session_id)
+        result = await self._pipeline.classify(text, session_id=session_id)
         return result.to_dict()
 
     def as_fastapi_app(self):

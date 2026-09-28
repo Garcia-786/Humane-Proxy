@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 import os
 
-import httpx
 
 from humane_proxy.classifiers.models import ClassificationResult
 from humane_proxy.classifiers.stage3.base import Stage3Classifier
@@ -43,8 +42,8 @@ _LLAMAGUARD_MAP: dict[str, str] = {
     "S6": "criminal_intent",   # Specialized Advice
     "S7": "safe",              # Privacy (not our domain)
     "S8": "safe",              # Intellectual Property (not our domain)
-    "S9": "safe",              # Indiscriminate Weapons → criminal_intent
-    "S10": "self_harm",        # Hate → could be self-harm adjacent
+    "S9": "criminal_intent",   # Indiscriminate Weapons
+    "S10": "safe",             # Hate (not our domain — content moderation, not human safety)
     "S11": "self_harm",        # Suicide & Self-Harm
     "S12": "criminal_intent",  # Sexual Content (minors)
     "S13": "safe",             # Elections (not our domain)
@@ -88,11 +87,14 @@ class LlamaGuardClassifier(Stage3Classifier):
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    self._api_url, json=payload, headers=headers
-                )
-                resp.raise_for_status()
+            from humane_proxy.http_client import get_async_client
+
+            client = get_async_client()
+            resp = await client.post(
+                self._api_url, json=payload, headers=headers,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
 
             body = resp.json()
             output = body["choices"][0]["message"]["content"].strip()
@@ -140,7 +142,16 @@ class LlamaGuardClassifier(Stage3Classifier):
         elif "criminal_intent" in categories_found:
             category = "criminal_intent"
         else:
-            category = "safe"
+            # Unsafe verdict, but every code maps outside our domain (or no
+            # codes were returned at all).  Keep it out of the risk score,
+            # but leave a visible trigger for the audit trail.
+            return ClassificationResult(
+                category="safe",
+                score=0.0,
+                triggers=["llamaguard:unsafe_out_of_scope"],
+                stage=3,
+                reasoning=f"LlamaGuard verdict: {output.strip()}",
+            )
 
         score = 1.0 if category == "self_harm" else 0.85
 

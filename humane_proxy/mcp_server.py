@@ -38,20 +38,30 @@ def _is_public_bind_host(host: str) -> bool:
 
 
 def _get_mcp_auth_provider():
-    """Return a FastMCP Bearer auth provider when HTTP MCP auth is configured."""
+    """Return a FastMCP auth provider when HTTP MCP auth is configured.
+
+    Uses ``StaticTokenVerifier``, which accepts a fixed bearer token —
+    clients must send ``Authorization: Bearer <token>``.  (Older code
+    imported a ``BearerTokenAuth`` class that no fastmcp release actually
+    exports, so setting the token crashed the server at import time.)
+    """
     token = os.environ.get(MCP_TOKEN_ENV, "").strip()
     if not token:
         return None
 
     try:
-        from fastmcp.server.auth import BearerTokenAuth  # type: ignore[import]
+        from fastmcp.server.auth.providers.jwt import (  # type: ignore[import]
+            StaticTokenVerifier,
+        )
     except ImportError as exc:
         raise RuntimeError(
             f"{MCP_TOKEN_ENV} is set, but this FastMCP version does not expose "
-            "server Bearer token auth. Upgrade fastmcp to use HTTP MCP auth."
+            "StaticTokenVerifier. Upgrade fastmcp (>=2.11) to use HTTP MCP auth."
         ) from exc
 
-    return BearerTokenAuth(token=token)
+    return StaticTokenVerifier(
+        tokens={token: {"client_id": "humane-proxy-admin", "scopes": []}}
+    )
 
 
 try:
@@ -64,6 +74,24 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # MCP app instance
 # ---------------------------------------------------------------------------
+
+_pipeline = None
+
+
+def _get_pipeline():
+    """Return the process-level SafetyPipeline singleton.
+
+    Previously every ``check_message_safety`` call constructed a fresh
+    ``SafetyPipeline`` (and with Stage 2 enabled, re-encoded the anchor
+    sentences) — hundreds of milliseconds of avoidable per-call setup.
+    """
+    global _pipeline
+    if _pipeline is None:
+        from humane_proxy.config import get_config
+        from humane_proxy.classifiers.pipeline import SafetyPipeline
+        _pipeline = SafetyPipeline(get_config())
+    return _pipeline
+
 
 if _MCP_AVAILABLE:
     auth_provider = _get_mcp_auth_provider()
@@ -93,12 +121,7 @@ if _MCP_AVAILABLE:
             ``{"safe": bool, "category": str, "score": float, "triggers": list,
                "stage_reached": int, "should_escalate": bool, ...}``
         """
-        from humane_proxy.config import get_config
-        from humane_proxy.classifiers.pipeline import SafetyPipeline
-
-        config = get_config()
-        pipeline = SafetyPipeline(config)
-        result = await pipeline.classify(message, session_id)
+        result = await _get_pipeline().classify(message, session_id=session_id)
         return result.to_dict()
 
     @mcp.tool()
@@ -140,39 +163,12 @@ if _MCP_AVAILABLE:
         list[dict]
             List of escalation records.
         """
-        import json
-        import sqlite3
         from humane_proxy.escalation.query import normalize_escalation_query
-        from humane_proxy.escalation.local_db import _get_db_path
+        from humane_proxy.storage.factory import get_store
 
         limit, category = normalize_escalation_query(limit, category)
-
-        conn = sqlite3.connect(_get_db_path(), check_same_thread=False)
-        try:
-            if category:
-                rows = conn.execute(
-                    "SELECT * FROM escalations WHERE category=? ORDER BY timestamp DESC LIMIT ?",
-                    (category, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM escalations ORDER BY timestamp DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-        finally:
-            conn.close()
-
-        cols = ["id", "session_id", "category", "risk_score", "triggers",
-                "timestamp", "message_hash", "stage_reached", "reasoning"]
-        result = []
-        for row in rows:
-            rec = dict(zip(cols, row))
-            try:
-                rec["triggers"] = json.loads(rec["triggers"])
-            except Exception:
-                pass
-            result.append(rec)
-        return result
+        store = get_store()
+        return store.query(category=category, limit=limit, offset=0)
 
 else:
     mcp = None  # type: ignore[assignment]
@@ -215,4 +211,3 @@ def serve_http(host: str = MCP_DEFAULT_HOST, port: int = 3000) -> None:
         )
     assert mcp is not None
     mcp.run(transport="http", host=host, port=port)
-

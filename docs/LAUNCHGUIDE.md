@@ -1,4 +1,4 @@
-# 🛡️ HumaneProxy — Launch Guide
+# HumaneProxy — Launch Guide
 
 ## What is HumaneProxy?
 
@@ -78,8 +78,8 @@ Classify a message for self-harm or criminal intent through the full pipeline.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `message` | string | ✅ | The user message to classify |
-| `session_id` | string | ❌ | Session identifier for trajectory tracking (default: `"mcp-default"`) |
+| `message` | string | Yes | The user message to classify |
+| `session_id` | string | No | Session identifier for trajectory tracking (default: `"mcp-default"`) |
 
 **Returns:** `{ "safe": bool, "category": str, "score": float, "triggers": list, "stage_reached": int, "should_escalate": bool }`
 
@@ -89,7 +89,7 @@ Return the current risk trajectory for a session, including spike detection and 
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | string | ✅ | The session identifier to query |
+| `session_id` | string | Yes | The session identifier to query |
 
 **Returns:** `{ "spike_detected": bool, "trend": str, "window_scores": list, "category_counts": dict, "message_count": int }`
 
@@ -99,8 +99,8 @@ Return recent escalation events from the audit log.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | int | ❌ | Maximum events to return (default: 20) |
-| `category` | string | ❌ | Filter by `"self_harm"` or `"criminal_intent"` |
+| `limit` | int | No | Maximum events to return (default: 20) |
+| `category` | string | No | Filter by `"self_harm"` or `"criminal_intent"` |
 
 **Returns:** List of escalation records with session IDs, scores, timestamps, and triggers.
 
