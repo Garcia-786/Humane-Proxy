@@ -533,6 +533,39 @@ register_safety_tools(assistant, user_proxy)
 pip install humane-proxy[langchain]
 ```
 
+## Direct Integration (FastAPI & Flask)
+
+If you prefer embedding HumaneProxy directly into your existing backend instead of running a standalone proxy server, use the code examples in the [`examples/`](./examples/) directory:
+
+- **FastAPI Middleware** ([`examples/fastapi_middleware.py`](./examples/fastapi_middleware.py)): Asynchronously screen incoming requests using `proxy.check_async()`.
+- **Flask `before_request` Hook** ([`examples/flask_integration.py`](./examples/flask_integration.py)): Synchronously inspect HTTP POST payloads using `proxy.check()`.
+- **OpenAI Wrapper** ([`examples/openai_proxy_wrapper.py`](./examples/openai_proxy_wrapper.py)): Wrap external LLM client calls to ensure prompts are evaluated before making API requests.
+
+### Quick Start with FastAPI
+
+```python
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from humane_proxy import HumaneProxy
+
+app = FastAPI()
+proxy = HumaneProxy()
+
+@app.middleware("http")
+async def safety_middleware(request: Request, call_next):
+    if request.method == "POST":
+        body = await request.json()
+        message = body.get("message", "")
+        if message:
+            result = await proxy.check_async(message, session_id=request.headers.get("x-session-id"))
+            if not result.get("safe", True):
+                return JSONResponse(
+                    status_code=200,
+                    content={"reply": result.get("care_response", "We're here to help.")}
+                )
+    return await call_next(request)
+```
+
 ```python
 from humane_proxy.integrations.langchain import get_safety_tools
 
